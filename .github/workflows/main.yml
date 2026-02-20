@@ -1,0 +1,27 @@
+name: 24h-Stock-Analysis-Bot
+
+on:
+  schedule:
+    # 깃허브 시간(UTC) = 한국 시간(KST) - 9시간
+    - cron: '0 22 * * *'  # 한국 오전 7시
+    - cron: '19 0 * * *'  # 한국 오전 9시 19분
+    - cron: '0 3 * * *'   # 한국 오후 12시
+    - cron: '0 11 * * *'  # 한국 오후 8시
+  workflow_dispatch:      # 수동 실행 버튼 활성화
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python stock_bot.py
