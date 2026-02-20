@@ -1,0 +1,6 @@
+FinanceDataReader
+pykrx
+pandas
+requests
+selenium
+webdriver-manager
