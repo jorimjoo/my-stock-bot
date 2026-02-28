@@ -1,18 +1,38 @@
+from flask import Flask
+import threading
 import time
 import datetime
 import pyupbit
 import requests
 import pandas as pd
-import traceback
+import os
 
 # ==================================================
-# --- 정보 입력 (본인의 정보를 직접 입력하세요) ---
+# 1. Render용 가짜 웹 서버 설정 (Port 10000)
+# ==================================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "UPBIT Bot is Running Alive!"
+
+def run_flask():
+    # Render는 10000번 포트가 열려있어야 'Live' 상태로 인식합니다.
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# 웹 서버를 별도의 쓰레드에서 백그라운드로 실행
+t = threading.Thread(target=run_flask)
+t.daemon = True
+t.start()
+
+# ==================================================
+# 2. 정보 입력 (본인의 정보를 직접 입력하세요)
 # ==================================================
 ACCESS_KEY = "voMLtW0LzLkMVY0gwbRQmvASYoPC1eOExxAm8G64"
 SECRET_KEY = "1GzX0hFxrc8YMhlPyhx8wnYNqNJlQ5Rzc2Xv2b2e"
 TOKEN = "8726756800:AAFRrzHgy4txpgO9BjVk1JZU4fFsCSYUkbc"
 CHAT_ID = "8403406400"
-# ==================================================
 
 # 업비트 객체 초기화
 try:
@@ -32,13 +52,14 @@ BB_WINDOW = 20
 BB_STD = 2.0           
 HEARTBEAT_HOURS = 6    
 
+# ==================================================
+# 3. 보조 함수들
+# ==================================================
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     params = {'chat_id': CHAT_ID, 'text': message}
     try:
         response = requests.post(url, data=params, timeout=10)
-        if response.status_code != 200:
-            print(f"❌ 텔레그램 실패")
     except: pass
 
 def get_rsi(ticker, period=14):
@@ -98,9 +119,11 @@ def check_bearish_engulfing(ticker):
         if curr['close'] < prev['open']: return True
     return False
 
-# --- 메인 루프 ---
-print(f"▶ 눌림목 공격형 모드 가동 중...")
-send_telegram("🛡️ [시스템 가동] 스캘핑 봇 시작 ")
+# ==================================================
+# 4. 메인 루프
+# ==================================================
+print(f"▶ 눌림목 공격형 모드 가동 중 (Render Mode)...")
+send_telegram("🛡️ [시스템 가동] Render 스캘핑 봇 시작")
 last_heartbeat = datetime.datetime.now()
 
 while True:
@@ -138,44 +161,36 @@ while True:
                 time.sleep(0.5)
 
         # --- 매수 탐색 ---
-        day_info = get_safe_ohlcv("KRW-BTC", interval="day", count=1)
-        if day_info is not None:
-            start_time, end_time = day_info.index[0], day_info.index[0] + datetime.timedelta(days=1)
+        if len(portfolio) < MAX_SLOTS:
+            prices = pyupbit.get_current_price(all_krw_tickers, verbose=True)
+            df_gainers = pd.DataFrame(prices)
+            df_gainers['rate'] = df_gainers['signed_change_rate'] * 100
+            target_tickers = df_gainers.sort_values(by='rate', ascending=False).head(TICKERS_COUNT)['market'].tolist()
+            
+            for ticker in target_tickers:
+                if any(p['ticker'] == ticker for p in portfolio): continue
+                curr_p = pyupbit.get_current_price(ticker)
+                upper_bb, mid_bb, lower_bb = get_bb(ticker)
+                ma7 = get_ma(ticker, 7)
+                ma20 = get_ma(ticker, 20)
+                rsi = get_rsi(ticker)
+                if not curr_p or not lower_bb or not ma7: continue
 
-            if start_time + datetime.timedelta(seconds=10) < now < end_time - datetime.timedelta(minutes=5):
-                if len(portfolio) < MAX_SLOTS:
-                    prices = pyupbit.get_current_price(all_krw_tickers, verbose=True)
-                    df_gainers = pd.DataFrame(prices)
-                    df_gainers['rate'] = df_gainers['signed_change_rate'] * 100
-                    target_tickers = df_gainers.sort_values(by='rate', ascending=False).head(TICKERS_COUNT)['market'].tolist()
-                    
-                    for ticker in target_tickers:
-                        if any(p['ticker'] == ticker for p in portfolio): continue
-                        curr_p = pyupbit.get_current_price(ticker)
-                        upper_bb, mid_bb, lower_bb = get_bb(ticker)
-                        ma7 = get_ma(ticker, 7)
-                        ma20 = get_ma(ticker, 20)
-                        rsi = get_rsi(ticker)
-                        if not curr_p or not lower_bb or not ma7: continue
+                df_day = get_safe_ohlcv(ticker, interval="day", count=2)
+                target_p = df_day.iloc[0]['close'] + (df_day.iloc[0]['high'] - df_day.iloc[0]['low']) * K_VALUE
+                
+                cond_break = (curr_p > target_p) and (curr_p > ma7) and (curr_p > ma20) and (45 < rsi < 75)
+                cond_pullback = (curr_p <= lower_bb * 1.05) and (rsi < 60) and (get_fractal_signal(ticker) or rsi < 40)
 
-                        df_day = get_safe_ohlcv(ticker, interval="day", count=2)
-                        target_p = df_day.iloc[0]['close'] + (df_day.iloc[0]['high'] - df_day.iloc[0]['low']) * K_VALUE
-                        
-                        # [전략 1] 신중한 돌파 (일봉 추세 유지)
-                        cond_break = (curr_p > target_p) and (curr_p > ma7) and (curr_p > ma20) and (45 < rsi < 75)
-                        
-                        # [전략 2] 완화된 눌림목 (일봉 추세 무관, BB 하단 + RSI 위주)
-                        # 하단 밴드 5% 이내 접근 + RSI 60 미만 + (프랙탈 신호 OR RSI 40 미만 과매도)
-                        cond_pullback = (curr_p <= lower_bb * 1.05) and (rsi < 60) and (get_fractal_signal(ticker) or rsi < 40)
-
-                        if cond_break or cond_pullback:
-                            krw_bal = upbit.get_balance("KRW")
-                            if krw_bal >= INVEST_FIXED:
-                                upbit.buy_market_order(ticker, INVEST_FIXED)
-                                strat = "돌파" if cond_break else "공격형눌림"
-                                send_telegram(f"🚀 [매수]\n종목: {ticker}\n전략: {strat}\nRSI: {rsi:.1f}\n금액: 5,000원")
-                                break
-                        time.sleep(0.1)
+                if cond_break or cond_pullback:
+                    krw_bal = upbit.get_balance("KRW")
+                    if krw_bal >= INVEST_FIXED:
+                        upbit.buy_market_order(ticker, INVEST_FIXED)
+                        strat = "돌파" if cond_break else "공격형눌림"
+                        send_telegram(f"🚀 [매수]\n종목: {ticker}\n전략: {strat}\nRSI: {rsi:.1f}\n금액: 5,000원")
+                        break
+                time.sleep(0.1)
         time.sleep(1)
     except Exception as e:
-        print(f"\n🚨 오류: {e}"); time.sleep(10)
+        print(f"\n🚨 오류: {e}")
+        time.sleep(10)
