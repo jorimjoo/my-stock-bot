@@ -33,8 +33,8 @@ t.start()
 # 2. 사용자 정보 및 환경 설정
 # ==================================================
 # ⚠️ 주의: 공개된 장소에 키를 노출하지 마세요!
-ACCESS_KEY = "voMLtW0LzLkMVY0gwbRQmvASYoPC1eOExxAm8G64"
-SECRET_KEY = "1GzX0hFxrc8YMhlPyhx8wnYNqNJlQ5Rzc2Xv2b2e"
+ACCESS_KEY = "QUA4RX6p9ZhFtZmbkx6xs3TPl9HJOfQY9FSXpiLd"
+SECRET_KEY = "1qOhaGpd9unIYxinnaaHJYGGhZcQlc9eq0QP8euy"
 TOKEN = "8726756800:AAFRrzHgy4txpgO9BjVk1JZU4fFsCSYUkbc"
 CHAT_ID = "8403406400"
 
@@ -220,3 +220,4 @@ while True:
         print(f"\n🚨 오류 발생:\n{error_msg}")
         send_telegram(f"🚨 봇 오류 발생:\n{str(e)[:100]}")
         time.sleep(10)
+
