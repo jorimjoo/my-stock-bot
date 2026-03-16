@@ -15,249 +15,179 @@ upbit = pyupbit.Upbit(access, secret)
 telegram_token = "8726756800:AAFRrzHgy4txpgO9BjVk1JZU4fFsCSYUkbc"
 telegram_chat_id = "8403406400"
 
+# 3. 통계 및 상태 관리 변수
+daily_stats = {
+    "trades": 0,
+    "wins": 0,
+    "profit": 0.0,
+    "last_report_date": datetime.datetime.now().date()
+}
+bot_state = {}
+
 def send_message(msg):
-    """텔레그램으로 메시지를 전송하는 함수"""
+    """텔레그램 메시지 전송"""
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         requests.get(url, params={"chat_id": telegram_chat_id, "text": msg})
     except Exception as e:
-        print(f"\n텔레그램 전송 에러: {e}")
-
-# 상태 관리를 위한 딕셔너리 (전 종목 무제한 모니터링)
-bot_state = {}
-
-# 3. 봇 가동 시작 메시지
-start_msg = "== 업비트 봇 가동 시작 =="
-print(start_msg)
-send_message(start_msg)
+        print(f"\n[Error] 텔레그램 전송 실패: {e}")
 
 def get_target_tickers():
-    """KRW 마켓의 모든 종목을 가져옵니다"""
-    return pyupbit.get_tickers(fiat="KRW")
+    """당일 거래대금 상위 30개 종목 추출 (시장 주도주 집중)"""
+    try:
+        tickers = pyupbit.get_tickers(fiat="KRW")
+        df_list = []
+        for ticker in tickers:
+            df = pyupbit.get_ohlcv(ticker, interval="day", count=1)
+            if df is not None:
+                df['ticker'] = ticker
+                df_list.append(df)
+            time.sleep(0.04) # API 호출 제한 방지
+        
+        full_df = pd.concat(df_list)
+        top_30 = full_df.sort_values(by='value', ascending=False).head(30)['ticker'].tolist()
+        return top_30
+    except Exception as e:
+        print(f"\n[!] 종목 갱신 중 오류 발생: {e}")
+        return pyupbit.get_tickers(fiat="KRW")[:30]
 
 def get_custom_atr(ticker):
-    """최근 50개 캔들의 TR 중 노이즈(상/하위 10개)를 제거한 30개의 평균 ATR 계산"""
+    """노이즈를 제거한 30분봉 기반 ATR 계산"""
     df = pyupbit.get_ohlcv(ticker, interval="minute30", count=50)
     if df is None: return 0
-    
     tr = df['high'] - df['low']
     tr_sorted = tr.sort_values()
-    
     if len(tr_sorted) == 50:
         tr_trimmed = tr_sorted.iloc[10:40]
         return tr_trimmed.mean()
     return tr.mean()
 
-def check_candle_patterns(df_30m):
-    """캔들 패턴 인식 (A그룹: 무조건 강세, B그룹: 20선 상승 시 강세)"""
-    try:
-        patterns = [
-            "morningstar", "morningdojistar", "engulfing",
-            "piercing", "hammer", "invertedhammer",
-            "dragonflydoji", "3whitesoldiers"
-        ]
-        
-        cdl_df = df_30m.ta.cdl_pattern(name=patterns)
-        if cdl_df is None or cdl_df.empty: return False
-            
-        df = pd.concat([df_30m, cdl_df], axis=1)
-        
-        group_a = (
-            (df.get('CDL_MORNINGSTAR', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_MORNINGDOJISTAR', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_ENGULFING', pd.Series([0])).iloc[-2] > 0)
-        )
-        
-        group_b_pattern = (
-            (df.get('CDL_PIERCING', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_HAMMER', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_INVERTEDHAMMER', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_DRAGONFLYDOJI', pd.Series([0])).iloc[-2] > 0) or
-            (df.get('CDL_3WHITESOLDIERS', pd.Series([0])).iloc[-2] > 0)
-        )
-        
-        ma20_increasing = df['ma20'].iloc[-2] > df['ma20'].iloc[-3]
-        group_b = group_b_pattern and ma20_increasing
-        
-        return group_a or group_b
-        
-    except Exception:
-        return False
-
 def check_buy_signals(ticker):
-    """1차(일봉, 4시간봉 추세) 및 2차(30분봉 캔들 패턴) 필터 확인"""
+    """상승 추세 + 캔들 패턴 + 거래량 폭증 필터"""
     try:
+        # 일봉 및 4시간봉 추세 확인
         df_day = pyupbit.get_ohlcv(ticker, interval="day", count=10)
-        if df_day is None: return False
-        df_day['ma5'] = df_day['close'].rolling(5).mean()
-        if not ((df_day['close'].iloc[-1] > df_day['open'].iloc[-1]) and (df_day['close'].iloc[-1] > df_day['ma5'].iloc[-1])):
-            return False
-        
         df_4h = pyupbit.get_ohlcv(ticker, interval="minute240", count=10)
-        if df_4h is None: return False
+        if df_day is None or df_4h is None: return False
+        
+        df_day['ma5'] = df_day['close'].rolling(5).mean()
+        day_cond = (df_day['close'].iloc[-1] > df_day['open'].iloc[-1]) and (df_day['close'].iloc[-1] > df_day['ma5'].iloc[-1])
+        if not day_cond: return False
+        
         df_4h['ma5'] = df_4h['close'].rolling(5).mean()
         df_4h['ma10'] = df_4h['close'].rolling(10).mean()
+        h4_cond = (df_4h['close'].iloc[-2] > df_4h['ma5'].iloc[-2]) and (df_4h['ma10'].iloc[-2] > df_4h['ma10'].iloc[-3])
+        if not h4_cond: return False
         
-        prev_4h_close = df_4h['close'].iloc[-2]
-        ma10_increasing = df_4h['ma10'].iloc[-2] > df_4h['ma10'].iloc[-3]
-        if not ((prev_4h_close > df_4h['ma5'].iloc[-2]) and (ma10_increasing or prev_4h_close > df_4h['ma10'].iloc[-2])):
-            return False
-        
+        # 30분봉 상세 분석
         df_30m = pyupbit.get_ohlcv(ticker, interval="minute30", count=40)
         if df_30m is None: return False
-        df_30m['ma20'] = df_30m['close'].rolling(20).mean()
         
-        return check_candle_patterns(df_30m)
-    except Exception:
+        # 거래량 필터: 최근 5봉 평균 대비 150% 이상
+        avg_vol = df_30m['volume'].iloc[-6:-1].mean()
+        if df_30m['volume'].iloc[-1] <= (avg_vol * 1.5): return False
+        
+        # 캔들 패턴 인식
+        df_30m['ma20'] = df_30m['close'].rolling(20).mean()
+        patterns = ["morningstar", "engulfing", "hammer"]
+        cdl_df = df_30m.ta.cdl_pattern(name=patterns)
+        if cdl_df is None: return False
+        
+        df = pd.concat([df_30m, cdl_df], axis=1)
+        # 이전 봉 완성 시점 기준 패턴 확인
+        pattern_cond = (df.get('CDL_MORNINGSTAR', pd.Series([0])).iloc[-2] > 0) or \
+                       (df.get('CDL_ENGULFING', pd.Series([0])).iloc[-2] > 0)
+        
+        return pattern_cond
+    except:
         return False
 
 def manage_virtual_orders(ticker, krw_balance):
-    """가상 주문(돌파매수, 분할 익절, 트레일링 스탑, 스탑로스) 관리"""
-    global bot_state
-    
-    if ticker not in bot_state:
-        bot_state[ticker] = {"status": "WAITING"}
-        
+    """가상 주문 관리 및 실전 매매 실행"""
+    global bot_state, daily_stats
+    if ticker not in bot_state: bot_state[ticker] = {"status": "WAITING"}
     state = bot_state[ticker]
+    
     current_price = pyupbit.get_current_price(ticker)
     if current_price is None: return
 
-    # [상태 1] 매수 신호 감시
     if state["status"] == "WAITING":
         if check_buy_signals(ticker):
             atr = get_custom_atr(ticker)
-            df_30m = pyupbit.get_ohlcv(ticker, interval="minute30", count=25)
-            ma20 = df_30m['close'].rolling(20).mean().iloc[-1] if df_30m is not None else 0
-            
-            k_val = 0.5 if current_price < ma20 else 0.3
-            stop_buy_price = current_price + (atr * k_val)
-            
-            state["status"] = "BUY_PENDING"
-            state["stop_buy_price"] = stop_buy_price
-            state["target_atr"] = atr
-            
-            msg = f"\n🔍 [{ticker}] 패턴 포착! 돌파 매수 대기\n- 현재가: {current_price:,.0f}원\n- 목표가: {stop_buy_price:,.0f}원"
-            print(msg)
+            stop_buy_price = current_price + (atr * 0.3)
+            state.update({"status": "BUY_PENDING", "stop_buy_price": stop_buy_price, "target_atr": atr})
+            print(f"\n[신호] {ticker} 돌파 매수 대기 시작 (목표가: {stop_buy_price:,.0f}원)")
 
-    # [상태 2] 돌파 매수 대기
     elif state["status"] == "BUY_PENDING":
         if current_price >= state["stop_buy_price"]:
-            buy_amount = krw_balance * 0.2
+            buy_amount = krw_balance * 0.25
             if buy_amount > 5000:
                 upbit.buy_market_order(ticker, buy_amount * 0.9995)
-                state["status"] = "HOLDING"
-                state["buy_price"] = current_price
-                
-                msg = f"\n🚀 [{ticker}] 돌파 매수 체결!\n- 체결가: {current_price:,.0f}원\n- 매수금액: {buy_amount:,.0f}원"
-                print(msg)
-                send_message(msg)
+                state.update({"status": "HOLDING", "buy_price": current_price, "initial_balance": upbit.get_balance(ticker)})
+                state["highest"] = current_price
+                state["part1"] = state["part2"] = True
+                send_message(f"🚀 [{ticker}] 돌파 성공! 매수 체결\n체결가: {current_price:,.0f}원")
 
-    # [상태 3] 보유 및 4분할 매도 감시
     elif state["status"] == "HOLDING":
         balance = upbit.get_balance(ticker)
-        if balance == 0 or balance is None: 
+        if balance < 1e-8: # 전량 매도 시 상태 초기화
             state["status"] = "WAITING"
-            state.pop("initial_balance", None)
             return
 
-        if "initial_balance" not in state:
-            state["initial_balance"] = balance
-            state["global_highest"] = current_price
-            state["part4_highest"] = 0.0
-            state["part1"] = state["part2"] = state["part3"] = state["part4"] = True
+        if current_price > state.get("highest", 0): state["highest"] = current_price
+        buy_price = state["buy_price"]
+        atr = state["target_atr"]
+        roi = ((current_price - buy_price) / buy_price) * 100
 
-        initial_balance = state["initial_balance"]
-        buy_price = state.get("buy_price", current_price)
-        atr = state.get("target_atr", current_price * 0.02)
-        
-        if current_price > state["global_highest"]:
-            state["global_highest"] = current_price
-        if current_price >= buy_price + (atr * 3) and current_price > state["part4_highest"]:
-            state["part4_highest"] = current_price
+        sell_qty = 0
+        reason = ""
 
-        global_highest = state["global_highest"]
-        part4_highest = state["part4_highest"]
-
-        sell_all = False
-        sell_reason = ""
-
-        # 1. 절대 방어막 (전량 매도)
+        # 익절/손절 로직
         if current_price <= buy_price - (atr * 1.5):
-            sell_all = True
-            sell_reason = "절대 손절 (-1.5 ATR 이탈)"
-        elif global_highest >= buy_price + (atr * 2) and current_price <= global_highest - (atr * 1.5):
-            sell_all = True
-            sell_reason = "트레일링 스탑 (수익권 진입 후 -1.5 ATR 하락)"
-
-        if sell_all:
-            upbit.sell_market_order(ticker, balance)
-            roi = ((current_price - buy_price) / buy_price) * 100
-            msg = f"\n🚨 [{ticker}] 방어막 전량 매도\n- 사유: {sell_reason}\n- 매도가: {current_price:,.0f}원\n- 수익률: {roi:.2f}%"
-            print(msg)
-            send_message(msg)
-            
-            state["status"] = "WAITING"
-            state.pop("initial_balance", None)
-            return
-
-        # 2. 4분할 매도
-        chunks_to_sell = 0
-        split_reason = ""
-        is_small_amount = (balance * current_price < 21000)
-
-        if state["part1"] and current_price <= global_highest - (atr * 1):
-            chunks_to_sell += 1
+            sell_qty, reason = balance, "절대손절(-1.5ATR)"
+        elif state["part1"] and current_price <= state["highest"] - atr:
+            sell_qty, reason = balance * 0.5, "1차익절(고점대비-1ATR)"
             state["part1"] = False
-            split_reason += "[1분할: 즉시 스탑] "
-            
-        if state["part2"] and current_price >= buy_price + (atr * 2):
-            chunks_to_sell += 1
-            state["part2"] = False
-            split_reason += "[2분할: +2 ATR] "
-            
-        if state["part3"] and current_price >= buy_price + (atr * 3):
-            chunks_to_sell += 1
-            state["part3"] = False
-            split_reason += "[3분할: +3 ATR] "
-            
-        if state["part4"] and part4_highest > 0 and current_price <= part4_highest - (atr * 1):
-            chunks_to_sell += 1
-            state["part4"] = False
-            split_reason += "[4분할: +3 ATR 이후 스탑] "
+        elif state["part2"] and current_price >= buy_price + (atr * 3.0):
+            sell_qty, reason = balance, "전량익절(+3ATR 도달)"
 
-        if chunks_to_sell > 0:
-            if is_small_amount:
-                sell_qty = balance 
-            else:
-                sell_qty = min(initial_balance * 0.25 * chunks_to_sell, balance)
-                
-            if (balance - sell_qty) * current_price < 5000:
-                sell_qty = balance
-                
-            upbit.sell_market_order(ticker, sell_qty)
-            roi = ((current_price - buy_price) / buy_price) * 100
-            msg = f"\n💸 [{ticker}] 분할 매도 체결\n- 사유: {split_reason}\n- 매도가: {current_price:,.0f}원\n- 수익률: {roi:.2f}%"
-            print(msg)
-            send_message(msg)
+        if sell_qty > 0:
+            actual_qty = min(sell_qty, balance)
+            if actual_qty * current_price < 5000: actual_qty = balance
+            upbit.sell_market_order(ticker, actual_qty)
+            
+            # 수익금 합계 계산 (간략화)
+            daily_stats["trades"] += 1
+            if roi > 0: daily_stats["wins"] += 1
+            daily_stats["profit"] += (current_price - buy_price) * actual_qty
+            send_message(f"💸 [{ticker}] {reason}\n가: {current_price:,.0f}원\n수익률: {roi:.2f}%")
 
-# 4. 메인 루프 실행
+# --- 메인 루프 ---
+send_message("== 쿠퍼춘봉 단타 봇 V2.0 가동 ==\n(실시간 감시 모드 활성화)")
+target_list = get_target_tickers()
+
 while True:
     try:
-        krw_balance = upbit.get_balance("KRW")
-        tickers = get_target_tickers()
+        now = datetime.datetime.now()
         
-        # 현재 시간과 모니터링 상태를 터미널 한 줄에 계속 업데이트 (Heartbeat)
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        sys.stdout.write(f"\r[{current_time}] 업비트 전 종목 타점 감시 중... 👀")
-        sys.stdout.flush()
+        # 매일 자정 통계 리포트 및 종목 갱신
+        if daily_stats["last_report_date"] != now.date():
+            wr = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
+            send_message(f"📅 일일 결산 [{daily_stats['last_report_date']}]\n- 거래: {daily_stats['trades']}회\n- 승률: {wr:.1f}%\n- 수익: {daily_stats['profit']:,.0f}원")
+            daily_stats.update({"trades": 0, "wins": 0, "profit": 0.0, "last_report_date": now.date()})
+            target_list = get_target_tickers()
+
+        krw = upbit.get_balance("KRW")
         
-        for ticker in tickers:
-            manage_virtual_orders(ticker, krw_balance)
-            time.sleep(0.1)
+        # [시스템 진행상황 업데이트]
+        # 터미널의 한 줄에서 정보가 계속 바뀝니다 (Heartbeat 기능)
+        for i, ticker in enumerate(target_list):
+            sys.stdout.write(f"\r[{now.strftime('%H:%M:%S')}] 감시 중: {ticker} ({i+1}/{len(target_list)}) | KRW: {krw:,.0f}원  ")
+            sys.stdout.flush()
             
-        time.sleep(5)
-        
+            manage_virtual_orders(ticker, krw)
+            time.sleep(0.1) # API 부하 분산
+
     except Exception as e:
-        error_msg = f"\n⚠️ 봇 메인 루프 에러 발생: {e}"
-        print(error_msg)
-        time.sleep(5)
+        print(f"\n[!] 메인 루프 예외 발생: {e}")
+        time.sleep(10)
