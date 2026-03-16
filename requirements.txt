@@ -1,10 +1,4 @@
-finance-datareader
-pykrx
-pandas
-requests
-selenium
 pyupbit
-requests
 pandas
-flask
-webdriver-manager
+pandas_ta
+requests
