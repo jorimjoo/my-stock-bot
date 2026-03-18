@@ -2,3 +2,4 @@ pyupbit
 pandas
 pandas_ta
 requests
+flask
