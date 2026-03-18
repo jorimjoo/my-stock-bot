@@ -28,19 +28,19 @@ bot_state = {"last_loss_times": {}}
 daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()}
 
 # ==========================================
-# 3. 🌐 가짜 웹 서버 방어막 (Render Timed out 방지)
+# 3. 🌐 가짜 웹 서버 (클라우드 구동 대비)
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스캘핑 봇 V5.1이 정상적으로 24시간 감시 중입니다! 🐶"
+    return "쿠퍼춘봉 스캘핑 봇 V5.3 정상 가동 중! 🐶"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # ==========================================
-# 4. 봇 핵심 로직 (매도 / 매수 / 알림)
+# 4. 봇 핵심 로직
 # ==========================================
 def send_message(msg):
     try:
@@ -54,8 +54,8 @@ def get_target_tickers():
     except: 
         return pyupbit.get_tickers(fiat="KRW")[:30]
 
-def sell_manager():
-    """[최우선 실행] 내 잔고 확인 및 목표 도달 시 즉각 전량 매도"""
+def sell_manager(valid_krw_tickers):
+    """[최우선 실행] 원화 마켓 유효 코인만 필터링 후 가격 조회 및 즉각 매도"""
     global daily_stats, bot_state
     try:
         balances = upbit.get_balances()
@@ -64,14 +64,18 @@ def sell_manager():
         holdings = []
         for b in balances:
             if b['currency'] != 'KRW' and float(b['balance']) + float(b['locked']) > 0:
-                holdings.append({
-                    'ticker': f"KRW-{b['currency']}",
-                    'balance': float(b['balance']) + float(b['locked']),
-                    'avg_buy_price': float(b['avg_buy_price'])
-                })
+                ticker = f"KRW-{b['currency']}"
+                # 🔥 [핵심 방어막] 현재 원화 마켓에 존재하는 코인만 담기!
+                if ticker in valid_krw_tickers:
+                    holdings.append({
+                        'ticker': ticker,
+                        'balance': float(b['balance']) + float(b['locked']),
+                        'avg_buy_price': float(b['avg_buy_price'])
+                    })
                 
         if not holdings: return "없음"
 
+        # 걸러진 정상 코인들만 모아서 가격 조회 (Code not found 에러 원천 차단)
         tickers_to_check = [h['ticker'] for h in holdings]
         current_prices = pyupbit.get_current_price(tickers_to_check)
         if not current_prices: return "가격로딩중"
@@ -106,10 +110,10 @@ def sell_manager():
             display_info.append(f"[{ticker} {roi:+.2f}%]")
             
         return " ".join(display_info) if display_info else "없음"
-    except: return "에러"
+    except Exception as e: 
+        return f"에러({e})"
 
 def buy_manager(ticker, krw_balance):
-    """5분봉 스캘핑 타점 스캔"""
     global bot_state
     now = datetime.datetime.now()
 
@@ -124,7 +128,6 @@ def buy_manager(ticker, krw_balance):
     df['ma20'] = df['close'].rolling(window=20).mean()
     curr, prev = df.iloc[-1], df.iloc[-2]
     
-    # 5분봉 정배열 + 거래량 돌파
     trend_ok = curr['close'] > curr['ma20']
     cross_ok = (curr['ma5'] > curr['ma20']) and (prev['ma5'] <= prev['ma20'])
     avg_vol = df['volume'].iloc[-6:-1].mean()
@@ -141,21 +144,19 @@ def buy_manager(ticker, krw_balance):
 # 5. 메인 실행부
 # ==========================================
 if __name__ == "__main__":
-    # --- 🚨 [IP 확인 로직] ---
     try:
         current_ip = requests.get('https://api.ipify.org').text
         print(f"\n======================================")
-        print(f"🌐 현재 Render 서버 외부 IP: {current_ip}")
+        print(f"🌐 현재 외부 IP: {current_ip}")
         print(f"======================================\n")
-    except:
-        print("\n🌐 IP 주소 확인 실패\n")
-    # --------------------------------
+    except: pass
 
-    # 가짜 웹 서버 실행
     Thread(target=run_server, daemon=True).start()
+    send_message("== 쿠퍼춘봉 스캘핑 봇 V5.3 가동 ==")
     
-    send_message("== 쿠퍼춘봉 스캘핑 봇 V5.1 가동 ==")
     target_list = get_target_tickers()
+    # 시작할 때 원화 마켓 전체 코인 목록을 미리 가져옵니다.
+    valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
 
     while True:
         try:
@@ -165,20 +166,22 @@ if __name__ == "__main__":
                 wr = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
                 send_message(f"📅 일일 결산 [{daily_stats['date']}]\n- 거래: {daily_stats['trades']}회\n- 승률: {wr:.1f}%\n- 수익: {daily_stats['profit']:,.0f}원")
                 daily_stats.update({"trades": 0, "wins": 0, "profit": 0.0, "date": now.date()})
+                
                 target_list = get_target_tickers()
+                # 하루에 한 번씩 원화 마켓 유효 코인 목록 업데이트
+                valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
 
             for ticker in target_list:
                 krw = upbit.get_balance("KRW")
                 
-                # IP 차단 또는 통신 에러 방어
                 if krw is None:
-                    print(f"[{now.strftime('%H:%M:%S')}] ⚠️ 잔고 조회 실패 (업비트 IP 제한 또는 일시적 오류)")
+                    print(f"[{now.strftime('%H:%M:%S')}] ⚠️ 잔고 조회 실패 (일시적 오류)")
                     time.sleep(5)
                     continue
 
-                holdings_str = sell_manager()
+                # 걸러낼 코인 목록을 sell_manager에 전달!
+                holdings_str = sell_manager(valid_krw_tickers)
                 
-                # Render 로그창에 텍스트가 잘 보이도록 print 사용
                 print(f"[{now.strftime('%H:%M:%S')}] 보유: {holdings_str} | 스캔: {ticker} | 잔고: {krw:,.0f}원")
                 
                 if krw > 5000: 
