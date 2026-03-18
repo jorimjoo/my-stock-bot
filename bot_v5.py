@@ -16,7 +16,7 @@ access = "1MUrRTR1vfHUP4Ru1Ax5UgYk2dTCHesiOUCysR6Z"
 secret = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 upbit = pyupbit.Upbit(access, secret)
 
-telegram_token = "8726756800:AAFRrzHgy4txpgO9BjVk1JZU4fFsCSYUkbc"  # 봇파더에서 새로 발급(revoke)받은 토큰
+telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"  # 봇파더에서 새로 발급(revoke)받은 토큰
 telegram_chat_id = "8403406400" # 챗 아이디는 그대로 사용
 
 # ==========================================
