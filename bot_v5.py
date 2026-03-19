@@ -18,13 +18,15 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 핵심 설정 (0.5% 초단타 스캘핑)
+# 2. 핵심 설정 (0.5% 초단타 & 이중 손절)
 # ==========================================
 TARGET_ROI = 0.5          # 목표 익절률 (%)
-STOP_LOSS_ROI = -1.0      # 기계적 칼손절률 (%)
+HARD_STOP_ROI = -2.0      # 하드 스탑 (재난 방지용 즉각 칼손절)
+SOFT_STOP_ROI = -0.5      # 소프트 스탑 (5분 경과 후 마이너스일 때 손절)
+WAIT_MINUTES = 5.0        # 매수 후 지켜볼 시간 (5분봉 1개)
 COOL_DOWN_MINUTES = 30    # 손절 후 해당 종목 재진입 금지 시간 (분)
 
-bot_state = {"last_loss_times": {}} 
+bot_state = {"last_loss_times": {}, "buy_times": {}} 
 daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()}
 
 # ==========================================
@@ -34,7 +36,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스캘핑 봇 V5.4 (주도주 추적 모드) 정상 가동 중! 🐶"
+    return "쿠퍼춘봉 스캘핑 봇 V5.5 (시간 유예 듀얼스탑 모드) 가동 중! 🐶"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
@@ -49,7 +51,7 @@ def send_message(msg):
     except: pass
 
 def get_target_tickers():
-    """🔥 [V5.4 핵심 개선] 당일 거래대금 상위 30개 종목을 정확히 추출 (초고속 API)"""
+    """당일 거래대금 상위 30개 종목 추출"""
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
         url = "https://api.upbit.com/v1/ticker"
@@ -59,18 +61,17 @@ def get_target_tickers():
         response = requests.get(url, headers=headers, params=querystring)
         data = response.json()
         
-        # 24시간 거래대금(acc_trade_price_24h) 기준으로 내림차순 정렬
         sorted_data = sorted(data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
         top_30 = [item['market'] for item in sorted_data][:30]
-        
         return top_30
     except Exception as e:
-        print(f"종목 갱신 에러: {e}")
         return pyupbit.get_tickers(fiat="KRW")[:30]
 
 def sell_manager(valid_krw_tickers):
-    """원화 마켓 유효 코인만 필터링 후 가격 조회 및 즉각 매도"""
+    """이중 손절(Dual Stop) 및 시간 유예 매도 로직 적용"""
     global daily_stats, bot_state
+    now = datetime.datetime.now()
+    
     try:
         balances = upbit.get_balances()
         if not balances: return "조회실패"
@@ -102,30 +103,48 @@ def sell_manager(valid_krw_tickers):
             
             curr_price = current_prices[ticker] if isinstance(current_prices, dict) else current_prices
             roi = ((curr_price - buy_price) / buy_price) * 100
+            
+            # 매수 시간 확인 (기록이 없으면 현재 시간으로 간주하여 유예시간 확보)
+            buy_time = bot_state["buy_times"].get(ticker, now)
+            held_minutes = (now - buy_time).total_seconds() / 60.0
 
-            if roi >= TARGET_ROI or roi <= STOP_LOSS_ROI:
-                if balance * curr_price > 5000:
-                    upbit.sell_market_order(ticker, balance)
-                    reason = f"✅ 목표 익절 (+{roi:.2f}%)" if roi > 0 else f"❌ 칼손절 ({roi:.2f}%)"
-                    
-                    daily_stats["trades"] += 1
-                    if roi > 0: daily_stats["wins"] += 1
-                    daily_stats["profit"] += (curr_price - buy_price) * balance
-                    
-                    send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n- 매도가: {curr_price:,.0f}원")
-                    
-                    if roi < 0: bot_state["last_loss_times"][ticker] = datetime.datetime.now()
-                    else: bot_state["last_loss_times"].pop(ticker, None)
-                    continue 
+            sell_reason = ""
+            
+            # 🚨 1. 목표 익절 (항상 최우선)
+            if roi >= TARGET_ROI:
+                sell_reason = f"✅ 목표 익절 (+{roi:.2f}%)"
+                
+            # 🚨 2. 하드 스탑 (재난 방지용 즉각 매도)
+            elif roi <= HARD_STOP_ROI:
+                sell_reason = f"💥 재난 방지 하드스탑 ({roi:.2f}%)"
+                
+            # 🚨 3. 소프트 스탑 (5분 경과 후 마이너스일 때 매도)
+            elif held_minutes >= WAIT_MINUTES and roi <= SOFT_STOP_ROI:
+                sell_reason = f"⏳ 시간초과 소프트스탑 ({roi:.2f}%)"
 
-            display_info.append(f"[{ticker} {roi:+.2f}%]")
+            # 매도 실행
+            if sell_reason and (balance * curr_price > 5000):
+                upbit.sell_market_order(ticker, balance)
+                
+                daily_stats["trades"] += 1
+                if roi > 0: daily_stats["wins"] += 1
+                daily_stats["profit"] += (curr_price - buy_price) * balance
+                
+                send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {sell_reason}\n- 보유시간: {held_minutes:.1f}분\n- 매도가: {curr_price:,.0f}원")
+                
+                if roi < 0: bot_state["last_loss_times"][ticker] = now
+                else: bot_state["last_loss_times"].pop(ticker, None)
+                
+                bot_state["buy_times"].pop(ticker, None) # 매수 기록 삭제
+                continue 
+
+            display_info.append(f"[{ticker} {roi:+.2f}% ({held_minutes:.1f}m)]")
             
         return " ".join(display_info) if display_info else "없음"
     except Exception as e: 
         return f"에러({e})"
 
 def buy_manager(ticker, krw_balance):
-    """🔥 [V5.4 핵심 개선] 정배열 상승 추세 & 완화된 수급 조건 탑승"""
     global bot_state
     now = datetime.datetime.now()
 
@@ -133,7 +152,6 @@ def buy_manager(ticker, krw_balance):
     if last_loss and (now - last_loss).total_seconds() / 60 < COOL_DOWN_MINUTES: return
     if upbit.get_balance(ticker) > 0: return
 
-    # 분석 기간을 20 캔들에서 30 캔들로 늘려 평균의 정확도를 높임
     df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
     if df is None or len(df) < 30: return
         
@@ -141,36 +159,26 @@ def buy_manager(ticker, krw_balance):
     df['ma20'] = df['close'].rolling(window=20).mean()
     curr = df.iloc[-1]
     
-    # 1. 상승 추세 (정배열): 가격 > 5일선 > 20일선으로 열려있기만 하면 OK
     trend_ok = (curr['close'] > curr['ma5']) and (curr['ma5'] > curr['ma20'])
-    
-    # 2. 수급 (거래량): 직전 10개 캔들 평균보다 1.5배 터지면 진입 (허들 완화)
     avg_vol = df['volume'].iloc[-11:-1].mean()
     vol_ok = curr['volume'] > (avg_vol * 1.5)
     
     if trend_ok and vol_ok:
-        # 거래량이 압도적(2.5배 이상)이면 30% 비중, 아니면 10%
         invest_ratio = 0.3 if curr['volume'] > (avg_vol * 2.5) else 0.1
         buy_amt = krw_balance * invest_ratio
         if buy_amt > 5000:
             upbit.buy_market_order(ticker, buy_amt * 0.9995)
-            send_message(f"🚀 [{ticker}] 주도주 정배열 탑승\n- 매수가: {curr['close']:,.0f}원\n- 비중: {invest_ratio*100}%")
+            # 💡 매수 성공 시 현재 시간을 기록하여 5분 유예 계산에 사용
+            bot_state["buy_times"][ticker] = datetime.datetime.now()
+            send_message(f"🚀 [{ticker}] 주도주 탑승\n- 매수가: {curr['close']:,.0f}원\n- 5분 유예스탑 가동")
 
 # ==========================================
 # 5. 메인 실행부
 # ==========================================
 if __name__ == "__main__":
-    try:
-        current_ip = requests.get('https://api.ipify.org').text
-        print(f"\n======================================")
-        print(f"🌐 현재 외부 IP: {current_ip}")
-        print(f"======================================\n")
-    except: pass
-
     Thread(target=run_server, daemon=True).start()
-    send_message("== 쿠퍼춘봉 스캘핑 봇 V5.4 가동 ==\n(🔥 거래대금 주도주 스캔 & 타점 완화)")
+    send_message("== 쿠퍼춘봉 스캘핑 봇 V5.5 가동 ==\n(⏳ 5분 시간유예 & 이중 손절막 적용)")
     
-    # 시작할 때 거래대금 상위 30개 및 전체 목록 가져오기
     target_list = get_target_tickers()
     valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
 
@@ -178,7 +186,6 @@ if __name__ == "__main__":
         try:
             now = datetime.datetime.now()
             
-            # 매일 자정 결산 및 주도주 리스트 대규모 갱신
             if daily_stats["date"] != now.date():
                 wr = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
                 send_message(f"📅 일일 결산 [{daily_stats['date']}]\n- 거래: {daily_stats['trades']}회\n- 승률: {wr:.1f}%\n- 수익: {daily_stats['profit']:,.0f}원")
@@ -187,7 +194,6 @@ if __name__ == "__main__":
                 target_list = get_target_tickers()
                 valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
 
-            # 루프를 돌 때마다 거래대금 상위 30개 종목을 집중 스캔
             for ticker in target_list:
                 krw = upbit.get_balance("KRW")
                 
@@ -205,7 +211,6 @@ if __name__ == "__main__":
                 
                 time.sleep(0.3) 
 
-            # 30개 순회가 끝나면 실시간 주도주(거래대금 상위)를 다시 뽑아냅니다 (초고속 API 활용)
             target_list = get_target_tickers()
 
         except Exception as e:
