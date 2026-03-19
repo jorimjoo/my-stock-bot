@@ -265,4 +265,28 @@ if __name__ == "__main__":
                 last_screen_time = now
             
             if daily_stats["date"] != now.date():
-                wr = (
+                wr = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
+                send_message(f"📅 일일 결산 [{daily_stats['date']}]\n- 거래: {daily_stats['trades']}회\n- 승률: {wr:.1f}%\n- 수익: {daily_stats['profit']:,.0f}원")
+                daily_stats.update({"trades": 0, "wins": 0, "profit": 0.0, "date": now.date()})
+                bot_state["loss_counts"] = {}
+                bot_state["blacklist_times"] = {}
+                valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
+                
+                target_list = get_elite_tickers()
+                last_screen_time = now
+
+            for ticker in target_list:
+                krw = upbit.get_balance("KRW")
+                if krw is None:
+                    time.sleep(5)
+                    continue
+
+                holdings_str = sell_manager(valid_krw_tickers)
+                sys.stdout.write(f"\r[{now.strftime('%H:%M:%S')}] 보유: {holdings_str} | 타겟: {ticker} | 잔고: {krw:,.0f}원    ")
+                sys.stdout.flush()
+                
+                if krw > 5000: buy_manager(ticker, krw)
+                time.sleep(0.3) 
+
+        except Exception as e:
+            time.sleep(5)
