@@ -5,6 +5,7 @@ import pandas_ta as ta
 import requests
 import datetime
 import sys
+import psutil # 🔥 시스템 상태(CPU, RAM) 확인용 모듈 추가
 from flask import Flask
 from threading import Thread
 
@@ -19,11 +20,11 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 핵심 설정 (손익비 & 블랙리스트)
+# 2. 핵심 설정 (1분봉 스캘핑)
 # ==========================================
-TARGET_ROI = 1.0          
-STOP_LOSS_ROI = -0.7      
-BLACKLIST_HOURS = 24      
+TARGET_ROI = 0.8          
+STOP_LOSS_ROI = -0.5      
+BLACKLIST_HOURS = 1       
 
 bot_state = {"loss_counts": {}, "blacklist_times": {}} 
 daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()}
@@ -36,13 +37,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스캘핑 봇 V6.1 (타겟 확장 & MACD 필터 모드) 가동 중! 🦅"
+    return "쿠퍼춘봉 스캘핑 봇 V7.1 (시스템 모니터링 가동) 🚀"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # ==========================================
-# 4. 봇 핵심 로직 (V6.1)
+# 4. 봇 핵심 로직
 # ==========================================
 def send_message(msg):
     try:
@@ -51,8 +52,6 @@ def send_message(msg):
     except: pass
 
 def get_elite_tickers():
-    """🔥 V6.1: 1시간봉 기반으로 스크리닝 조건을 완화하여 타겟 15개로 확장"""
-    send_message("🔍 [시스템] 타겟 확장을 위한 1시간봉 주도주 스크리닝을 시작합니다...")
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
         url = "https://api.upbit.com/v1/ticker"
@@ -63,37 +62,13 @@ def get_elite_tickers():
         
         candidates = []
         for item in data:
-            # 거래대금 50억 이상, 당일 상승 중인 코인으로 1차 허들 낮춤
-            if item['acc_trade_price_24h'] > 5000000000 and item['signed_change_rate'] > 0:
+            if item['acc_trade_price_24h'] > 3000000000 and item['signed_change_rate'] > 0:
                 candidates.append(item)
                 
-        candidates = sorted(candidates, key=lambda x: x['acc_trade_price_24h'], reverse=True)[:30]
-        top_tickers = [c['market'] for c in candidates]
-        
-        elite_tickers = []
-        for ticker in top_tickers:
-            time.sleep(0.1) 
-            # 일봉 대신 1시간봉(minute60)을 사용하여 더 많은 종목 포착
-            df_hour = pyupbit.get_ohlcv(ticker, interval="minute60", count=30)
-            if df_hour is None or len(df_hour) < 30: continue
-                
-            ma5 = df_hour['close'].rolling(5).mean().iloc[-1]
-            ma20 = df_hour['close'].rolling(20).mean().iloc[-1]
-            curr_price = df_hour['close'].iloc[-1]
-            
-            # 1시간봉 기준 단기 우상향 (현재가 > 20선, 5선 > 20선)
-            if curr_price > ma20 and ma5 > ma20:
-                elite_tickers.append(ticker)
-                
-            if len(elite_tickers) >= 15: # 타겟을 15개까지 넉넉하게 확장
-                break
-                
-        send_message(f"🎯 [스크리닝 완료] 1시간봉 주도주 {len(elite_tickers)}개 포착!\n" + ", ".join([t.replace("KRW-", "") for t in elite_tickers]))
-        return elite_tickers if elite_tickers else top_tickers[:10]
-        
+        candidates = sorted(candidates, key=lambda x: x['acc_trade_price_24h'], reverse=True)[:20]
+        return [c['market'] for c in candidates]
     except Exception as e:
-        send_message(f"⚠️ 스크리닝 에러: {e}")
-        return pyupbit.get_tickers(fiat="KRW")[:15]
+        return pyupbit.get_tickers(fiat="KRW")[:20]
 
 def sell_manager(valid_krw_tickers):
     global daily_stats, total_stats, bot_state
@@ -133,7 +108,7 @@ def sell_manager(valid_krw_tickers):
             if roi >= TARGET_ROI or roi <= STOP_LOSS_ROI:
                 if balance * curr_price > 5000:
                     upbit.sell_market_order(ticker, balance)
-                    reason = f"✅ 목표 익절 (+{roi:.2f}%)" if roi > 0 else f"❌ 칼손절 ({roi:.2f}%)"
+                    reason = f"✅ 초속 익절 (+{roi:.2f}%)" if roi > 0 else f"❌ 칼손절 ({roi:.2f}%)"
                     profit_krw = (curr_price - buy_price) * balance
                     
                     daily_stats["trades"] += 1
@@ -149,9 +124,9 @@ def sell_manager(valid_krw_tickers):
                         bot_state["loss_counts"][ticker] = bot_state["loss_counts"].get(ticker, 0) + 1
                         if bot_state["loss_counts"][ticker] >= 2:
                             bot_state["blacklist_times"][ticker] = now
-                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n🚨 2회 손절로 24시간 매수 금지!")
+                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n🚨 2아웃! 1시간 매수 금지.")
                         else:
-                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n⚠️ 1회 경고 누적")
+                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n⚠️ 1회 경고")
                     else:
                         bot_state["loss_counts"][ticker] = 0
                         send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}")
@@ -171,43 +146,32 @@ def buy_manager(ticker, krw_balance):
     if blacklist_time and (now - blacklist_time).total_seconds() / 3600 < BLACKLIST_HOURS: return
     if upbit.get_balance(ticker) > 0: return
 
-    df = pyupbit.get_ohlcv(ticker, interval="minute5", count=60)
+    df = pyupbit.get_ohlcv(ticker, interval="minute1", count=60)
     if df is None or len(df) < 60: return
         
-    # 이동평균 및 RSI
-    df['ma20'] = ta.sma(df['close'], length=20)
-    df['ma60'] = ta.sma(df['close'], length=60)
-    df['rsi'] = ta.rsi(df['close'], length=14)
+    bbands = ta.bbands(df['close'], length=20, std=2)
+    if bbands is None: return
+    df = pd.concat([df, bbands], axis=1)
     
-    # 🔥 가짜 반등 방지용 MACD 직접 계산 (가장 안정적)
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = macd - signal # 히스토그램 (MACD - 시그널)
+    upper_band = df.columns[df.columns.str.contains('BBU')][0]
     
     curr = df.iloc[-1]
     prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
     
-    # [조건 1] 단기 추세 우상향 유지
-    trend_ok = curr['ma20'] > curr['ma60']
+    breakout_ok = (prev['close'] < prev[upper_band]) and (curr['close'] > curr[upper_band])
+    avg_vol = df['volume'].iloc[-21:-1].mean()
+    vol_ok = curr['volume'] > (avg_vol * 2.0)
+    trend_ok = curr['close'] > df['close'].rolling(20).mean().iloc[-1]
     
-    # [조건 2] 과매도 구간 (낙폭 발생)
-    rsi_ok = curr['rsi'] < 40 
-    
-    # 🔥 [조건 3] 가짜 반등 방지: MACD 히스토그램이 상승으로 꺾여야 함 (하락 에너지가 끝나는 지점)
-    macd_ok = (curr['macd_hist'] > prev['macd_hist']) and (prev['macd_hist'] > prev2['macd_hist'])
-    
-    # 🔥 [조건 4] 캔들 확인: 떨어지는 음봉이 아니라 반등하는 양봉일 때만
-    candle_ok = curr['close'] > curr['open']
-    
-    if trend_ok and rsi_ok and macd_ok and candle_ok:
+    if breakout_ok and vol_ok and trend_ok:
         buy_amt = krw_balance * 0.20 
         if buy_amt > 5000:
             upbit.buy_market_order(ticker, buy_amt * 0.9995)
-            send_message(f"🚀 [{ticker}] 안전 반등(MACD 턴어라운드) 포착!\n- 매수가: {curr['close']:,.0f}원\n- RSI: {curr['rsi']:.1f}")
+            send_message(f"🚀 [{ticker}] 1분봉 볼린저 돌파!\n- 매수가: {curr['close']:,.0f}원")
 
+# ==========================================
+# 🔥 5. 텔레그램 명령어 수신 (시스템 상태 추가)
+# ==========================================
 def telegram_listener():
     global total_stats, daily_stats
     last_update_id = 0
@@ -223,13 +187,30 @@ def telegram_listener():
                     msg = item.get("message", {}).get("text", "")
                     
                     if msg == "/상태" or msg.lower() == "/status":
+                        now = datetime.datetime.now()
+                        
+                        # 1. 서버 시스템 상태 수집
+                        cpu_usage = psutil.cpu_percent(interval=0.1)
+                        ram_usage = psutil.virtual_memory().percent
+                        uptime_duration = now - total_stats['start_time']
+                        hours, remainder = divmod(uptime_duration.total_seconds(), 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        
+                        # 2. 업비트 계좌 상태 수집
+                        krw_balance = upbit.get_balance("KRW")
+                        krw_str = f"{krw_balance:,.0f}원" if krw_balance is not None else "조회 실패"
+                        
+                        # 3. 통계 계산
                         wr = (total_stats['wins'] / total_stats['trades'] * 100) if total_stats['trades'] > 0 else 0
                         d_wr = (daily_stats['wins'] / daily_stats['trades'] * 100) if daily_stats['trades'] > 0 else 0
                         start_str = total_stats['start_time'].strftime('%m/%d %H:%M')
                         
                         reply = (
-                            f"📊 [쿠퍼춘봉 스나이퍼 현황]\n"
-                            f"⏱ 가동: {start_str}\n\n"
+                            f"🤖 [쿠퍼춘봉 시스템 브리핑]\n"
+                            f"⏱ 봇 가동: {start_str}\n"
+                            f"⏳ 구동 시간: {int(hours)}시간 {int(minutes)}분\n"
+                            f"💻 서버 상태: CPU {cpu_usage}% / RAM {ram_usage}%\n"
+                            f"💰 보유 KRW: {krw_str}\n\n"
                             f"📈 [전체 누적 통계]\n"
                             f"- 누적 수익: {total_stats['profit']:,.0f}원\n"
                             f"- 누적 거래: {total_stats['trades']}회 (승률 {wr:.1f}%)\n\n"
@@ -242,16 +223,15 @@ def telegram_listener():
         time.sleep(2)
 
 # ==========================================
-# 5. 메인 실행부
+# 6. 메인 실행부
 # ==========================================
 if __name__ == "__main__":
     Thread(target=run_server, daemon=True).start()
     Thread(target=telegram_listener, daemon=True).start()
     
-    send_message("== 쿠퍼춘봉 스캘핑 봇 V6.1 가동 ==\n(🦅 타겟 확장 & MACD 가짜반등 완벽 방어)")
+    send_message("== 쿠퍼춘봉 스캘핑 봇 V7.1 가동 ==\n(💡 '/상태' 입력 시 시스템 및 잔고 종합 브리핑)")
     
     valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
-    
     target_list = get_elite_tickers()
     last_screen_time = datetime.datetime.now()
 
@@ -259,8 +239,7 @@ if __name__ == "__main__":
         try:
             now = datetime.datetime.now()
             
-            # 매 1시간마다 새로운 대장주 스크리닝 (두뇌 리셋)
-            if (now - last_screen_time).total_seconds() >= 3600:
+            if (now - last_screen_time).total_seconds() >= 1800:
                 target_list = get_elite_tickers()
                 last_screen_time = now
             
