@@ -20,13 +20,15 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 핵심 설정 (1분봉 하단 반등 스캘핑)
+# 2. 스윙 및 모멘텀 추적 설정 (트레일링 스탑)
 # ==========================================
-TARGET_ROI = 0.8          
-STOP_LOSS_ROI = -0.5      
-BLACKLIST_HOURS = 1       
+TRAILING_ACTIVATE_ROI = 3.0   # 수익률이 3% 이상일 때 트레일링 스탑 가동
+TRAILING_DROP_RATE = 1.5      # 최고점 대비 1.5% 하락 시 모멘텀 종료로 판단 후 익절
+STOP_LOSS_ROI = -2.5          # 기본 손절률
+BLACKLIST_HOURS = 12          # 손절 시 쿨다운
 
-bot_state = {"loss_counts": {}, "blacklist_times": {}} 
+# 🔥 고점 추적을 위한 max_prices 딕셔너리 추가
+bot_state = {"loss_counts": {}, "blacklist_times": {}, "max_prices": {}} 
 daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()}
 total_stats = {"trades": 0, "wins": 0, "profit": 0.0, "start_time": datetime.datetime.now()}
 
@@ -37,7 +39,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스캘핑 봇 정상 가동 중! 🚀"
+    return "쿠퍼춘봉 스윙 봇 V9.1 (트레일링 스탑 가동 중!) 🦅"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
@@ -52,25 +54,40 @@ def send_message(msg):
     except: pass
 
 def get_elite_tickers():
+    send_message("🔍 [시스템] Top-Down 다중 시간프레임 스크리닝 시작...")
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
         url = "https://api.upbit.com/v1/ticker"
         headers = {"accept": "application/json"}
-        
         response = requests.get(url, headers=headers, params={"markets": ",".join(tickers)})
         data = response.json()
         
-        candidates = []
-        for item in data:
-            if item['acc_trade_price_24h'] > 3000000000:
-                candidates.append(item)
+        candidates = sorted([item for item in data if item['acc_trade_price_24h'] > 10000000000], 
+                            key=lambda x: x['acc_trade_price_24h'], reverse=True)[:25]
+        top_tickers = [c['market'] for c in candidates]
+        
+        elite_tickers = []
+        for ticker in top_tickers:
+            time.sleep(0.1)
+            df_day = pyupbit.get_ohlcv(ticker, interval="day", count=60)
+            if df_day is None or len(df_day) < 60: continue
+            
+            ma20_day = df_day['close'].rolling(20).mean().iloc[-1]
+            ma60_day = df_day['close'].rolling(60).mean().iloc[-1]
+            curr_price = df_day['close'].iloc[-1]
+            
+            if curr_price > ma60_day and ma20_day > ma60_day:
+                elite_tickers.append(ticker)
                 
-        candidates = sorted(candidates, key=lambda x: x['acc_trade_price_24h'], reverse=True)[:20]
-        return [c['market'] for c in candidates]
+            if len(elite_tickers) >= 10: break
+            
+        send_message(f"🎯 [스크리닝 완료] 스윙 타겟 {len(elite_tickers)}개 확보!")
+        return elite_tickers if elite_tickers else top_tickers[:5]
     except Exception as e:
-        return pyupbit.get_tickers(fiat="KRW")[:20]
+        return pyupbit.get_tickers(fiat="KRW")[:10]
 
 def sell_manager(valid_krw_tickers):
+    """🔥 모멘텀 추적(Trailing Stop) 및 단기 이평 이탈 매도 로직 반영"""
     global daily_stats, total_stats, bot_state
     now = datetime.datetime.now()
     try:
@@ -99,40 +116,60 @@ def sell_manager(valid_krw_tickers):
             ticker = hold['ticker']
             buy_price = hold['avg_buy_price']
             balance = hold['balance']
-            
             if buy_price == 0: continue 
             
             curr_price = current_prices[ticker] if isinstance(current_prices, dict) else current_prices
             roi = ((curr_price - buy_price) / buy_price) * 100
+            
+            # 1. 고점(Max Price) 갱신 로직
+            max_price = bot_state["max_prices"].get(ticker, buy_price)
+            if curr_price > max_price:
+                bot_state["max_prices"][ticker] = curr_price
+                max_price = curr_price
+            
+            max_roi = ((max_price - buy_price) / buy_price) * 100
+            drop_from_peak = ((max_price - curr_price) / max_price) * 100
 
-            if roi >= TARGET_ROI or roi <= STOP_LOSS_ROI:
-                if balance * curr_price > 5000:
-                    upbit.sell_market_order(ticker, balance)
-                    reason = f"✅ 초속 익절 (+{roi:.2f}%)" if roi > 0 else f"❌ 칼손절 ({roi:.2f}%)"
-                    profit_krw = (curr_price - buy_price) * balance
-                    
-                    daily_stats["trades"] += 1
-                    total_stats["trades"] += 1
-                    daily_stats["profit"] += profit_krw
-                    total_stats["profit"] += profit_krw
-                    
-                    if roi > 0: 
-                        daily_stats["wins"] += 1
-                        total_stats["wins"] += 1
-                    
-                    if roi < 0:
-                        bot_state["loss_counts"][ticker] = bot_state["loss_counts"].get(ticker, 0) + 1
-                        if bot_state["loss_counts"][ticker] >= 2:
-                            bot_state["blacklist_times"][ticker] = now
-                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n🚨 2아웃! 1시간 매수 금지.")
-                        else:
-                            send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}\n⚠️ 1회 경고")
-                    else:
-                        bot_state["loss_counts"][ticker] = 0
-                        send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {reason}")
-                    continue 
+            sell_reason = ""
 
-            display_info.append(f"[{ticker} {roi:+.2f}%]")
+            # 🚨 매도 조건 1: 트레일링 스탑 (수익 3% 이상 도달 후, 고점 대비 1.5% 하락 시)
+            if max_roi >= TRAILING_ACTIVATE_ROI and drop_from_peak >= TRAILING_DROP_RATE:
+                sell_reason = f"🚀 모멘텀 종료 (트레일링 익절: +{roi:.2f}%) / 최고수익: +{max_roi:.2f}%"
+
+            # 🚨 매도 조건 2: 단기 상승 추세 붕괴 (5분봉 5일선 이탈) - 수익권일 때만 발동
+            if not sell_reason and roi > 1.0:
+                df_5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=10)
+                if df_5 is not None and len(df_5) > 5:
+                    ma5 = df_5['close'].rolling(5).mean().iloc[-1]
+                    if curr_price < ma5:
+                        sell_reason = f"📉 5분봉 상승추세 붕괴 익절 (+{roi:.2f}%)"
+
+            # 🚨 매도 조건 3: 기본 손절 라인
+            if not sell_reason and roi <= STOP_LOSS_ROI:
+                sell_reason = f"❌ 스윙 지지선 이탈 손절 ({roi:.2f}%)"
+
+            if sell_reason and (balance * curr_price > 5000):
+                upbit.sell_market_order(ticker, balance)
+                profit_krw = (curr_price - buy_price) * balance
+                
+                daily_stats["trades"] += 1
+                total_stats["trades"] += 1
+                daily_stats["profit"] += profit_krw
+                total_stats["profit"] += profit_krw
+                
+                if roi > 0: 
+                    daily_stats["wins"] += 1
+                    total_stats["wins"] += 1
+                else:
+                    bot_state["blacklist_times"][ticker] = now
+                
+                # 매도 후 기록 삭제
+                bot_state["max_prices"].pop(ticker, None)
+                
+                send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {sell_reason}")
+                continue 
+
+            display_info.append(f"[{ticker} {roi:+.2f}% (Max: {max_roi:+.2f}%)]")
             
         return " ".join(display_info) if display_info else "없음"
     except Exception as e: 
@@ -146,39 +183,40 @@ def buy_manager(ticker, krw_balance):
     if blacklist_time and (now - blacklist_time).total_seconds() / 3600 < BLACKLIST_HOURS: return
     if upbit.get_balance(ticker) > 0: return
 
-    df = pyupbit.get_ohlcv(ticker, interval="minute1", count=60)
-    if df is None or len(df) < 60: return
-        
-    bbands = ta.bbands(df['close'], length=20, std=2)
-    if bbands is None: return
-    df = pd.concat([df, bbands], axis=1)
+    df_60 = pyupbit.get_ohlcv(ticker, interval="minute60", count=60)
+    if df_60 is None or len(df_60) < 60: return
     
-    df['rsi'] = ta.rsi(df['close'], length=14)
+    df_60['ma22'] = df_60['close'].rolling(22).mean()
+    curr_60 = df_60.iloc[-1]
+    prev_60 = df_60.iloc[-2]
     
-    # 볼린저 밴드 하단선 (BBL) 추출
-    lower_band = df.columns[df.columns.str.contains('BBL')][0]
+    trend_60m_ok = curr_60['ma22'] > prev_60['ma22']
     
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+    df_10 = pyupbit.get_ohlcv(ticker, interval="minute10", count=60)
+    if df_10 is None or len(df_10) < 60: return
     
-    # 🔥 [핵심 타점 변경] 돌파(상단)가 아니라 낙폭과대(하단)를 잡습니다.
-    # 조건 1: 이전 캔들이 볼린저 밴드 하단을 강하게 이탈했거나 닿음
-    bb_bottom_touch = prev['close'] <= prev[lower_band]
+    bb44_10 = ta.bbands(df_10['open'], length=44, std=2)
+    df_10 = pd.concat([df_10, bb44_10], axis=1)
+    lower_44_10m = df_10.columns[df_10.columns.str.contains('BBL')][0]
     
-    # 조건 2: RSI가 30 이하로 극단적 과매도 상태
-    rsi_oversold = curr['rsi'] < 30
+    curr_10 = df_10.iloc[-1]
     
-    # 조건 3: 현재 캔들이 양봉으로 전환하며 반등을 시작함
-    rebound_start = curr['close'] > prev['close']
+    touch_bottom = curr_10['low'] <= curr_10[lower_44_10m]
     
-    if bb_bottom_touch and rsi_oversold and rebound_start:
-        buy_amt = krw_balance * 0.20 
+    body = abs(curr_10['open'] - curr_10['close'])
+    lower_shadow = min(curr_10['open'], curr_10['close']) - curr_10['low']
+    hammer_candle = lower_shadow > (body * 1.5) and lower_shadow > 0
+    
+    if trend_60m_ok and touch_bottom and hammer_candle:
+        buy_amt = krw_balance * 0.30 
         if buy_amt > 5000:
             upbit.buy_market_order(ticker, buy_amt * 0.9995)
-            send_message(f"🚀 [{ticker}] 1분봉 과매도 하단 반등 포착!\n- 매수가: {curr['close']:,.0f}원\n- RSI: {curr['rsi']:.1f}")
+            # 매수 직후 max_price 초기화
+            bot_state["max_prices"][ticker] = curr_10['close']
+            send_message(f"🚀 [{ticker}] 스윙 타점 포착!\n- 매수가: {curr_10['close']:,.0f}원\n- 다중시간 필터 통과 (트레일링 스탑 대기)")
 
 # ==========================================
-# 🔥 5. 텔레그램 명령어 수신
+# 5. 텔레그램 명령어 수신
 # ==========================================
 def telegram_listener():
     global total_stats, daily_stats
@@ -243,7 +281,7 @@ if __name__ == "__main__":
         try:
             now = datetime.datetime.now()
             
-            if (now - last_screen_time).total_seconds() >= 1800:
+            if (now - last_screen_time).total_seconds() >= 7200:
                 target_list = get_elite_tickers()
                 last_screen_time = now
             
@@ -265,6 +303,8 @@ if __name__ == "__main__":
                     continue
 
                 holdings_str = sell_manager(valid_krw_tickers)
+                
+                # 터미널 화면에도 최고 수익률(Max)을 함께 표시하여 추적 상황을 볼 수 있게 했습니다.
                 sys.stdout.write(f"\r[{now.strftime('%H:%M:%S')}] 보유: {holdings_str} | 타겟: {ticker} | 잔고: {krw:,.0f}원    ")
                 sys.stdout.flush()
                 
