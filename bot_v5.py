@@ -5,7 +5,7 @@ import pandas_ta as ta
 import requests
 import datetime
 import sys
-import psutil # 🔥 시스템 상태(CPU, RAM) 확인용 모듈 추가
+import psutil 
 from flask import Flask
 from threading import Thread
 
@@ -20,7 +20,7 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 핵심 설정 (1분봉 스캘핑)
+# 2. 핵심 설정 (1분봉 하단 반등 스캘핑)
 # ==========================================
 TARGET_ROI = 0.8          
 STOP_LOSS_ROI = -0.5      
@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스캘핑 봇 V7.1 (시스템 모니터링 가동) 🚀"
+    return "쿠퍼춘봉 스캘핑 봇 정상 가동 중! 🚀"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
@@ -62,7 +62,7 @@ def get_elite_tickers():
         
         candidates = []
         for item in data:
-            if item['acc_trade_price_24h'] > 3000000000 and item['signed_change_rate'] > 0:
+            if item['acc_trade_price_24h'] > 3000000000:
                 candidates.append(item)
                 
         candidates = sorted(candidates, key=lambda x: x['acc_trade_price_24h'], reverse=True)[:20]
@@ -153,24 +153,32 @@ def buy_manager(ticker, krw_balance):
     if bbands is None: return
     df = pd.concat([df, bbands], axis=1)
     
-    upper_band = df.columns[df.columns.str.contains('BBU')][0]
+    df['rsi'] = ta.rsi(df['close'], length=14)
+    
+    # 볼린저 밴드 하단선 (BBL) 추출
+    lower_band = df.columns[df.columns.str.contains('BBL')][0]
     
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     
-    breakout_ok = (prev['close'] < prev[upper_band]) and (curr['close'] > curr[upper_band])
-    avg_vol = df['volume'].iloc[-21:-1].mean()
-    vol_ok = curr['volume'] > (avg_vol * 2.0)
-    trend_ok = curr['close'] > df['close'].rolling(20).mean().iloc[-1]
+    # 🔥 [핵심 타점 변경] 돌파(상단)가 아니라 낙폭과대(하단)를 잡습니다.
+    # 조건 1: 이전 캔들이 볼린저 밴드 하단을 강하게 이탈했거나 닿음
+    bb_bottom_touch = prev['close'] <= prev[lower_band]
     
-    if breakout_ok and vol_ok and trend_ok:
+    # 조건 2: RSI가 30 이하로 극단적 과매도 상태
+    rsi_oversold = curr['rsi'] < 30
+    
+    # 조건 3: 현재 캔들이 양봉으로 전환하며 반등을 시작함
+    rebound_start = curr['close'] > prev['close']
+    
+    if bb_bottom_touch and rsi_oversold and rebound_start:
         buy_amt = krw_balance * 0.20 
         if buy_amt > 5000:
             upbit.buy_market_order(ticker, buy_amt * 0.9995)
-            send_message(f"🚀 [{ticker}] 1분봉 볼린저 돌파!\n- 매수가: {curr['close']:,.0f}원")
+            send_message(f"🚀 [{ticker}] 1분봉 과매도 하단 반등 포착!\n- 매수가: {curr['close']:,.0f}원\n- RSI: {curr['rsi']:.1f}")
 
 # ==========================================
-# 🔥 5. 텔레그램 명령어 수신 (시스템 상태 추가)
+# 🔥 5. 텔레그램 명령어 수신
 # ==========================================
 def telegram_listener():
     global total_stats, daily_stats
@@ -188,19 +196,15 @@ def telegram_listener():
                     
                     if msg == "/상태" or msg.lower() == "/status":
                         now = datetime.datetime.now()
-                        
-                        # 1. 서버 시스템 상태 수집
                         cpu_usage = psutil.cpu_percent(interval=0.1)
                         ram_usage = psutil.virtual_memory().percent
                         uptime_duration = now - total_stats['start_time']
                         hours, remainder = divmod(uptime_duration.total_seconds(), 3600)
                         minutes, seconds = divmod(remainder, 60)
                         
-                        # 2. 업비트 계좌 상태 수집
                         krw_balance = upbit.get_balance("KRW")
                         krw_str = f"{krw_balance:,.0f}원" if krw_balance is not None else "조회 실패"
                         
-                        # 3. 통계 계산
                         wr = (total_stats['wins'] / total_stats['trades'] * 100) if total_stats['trades'] > 0 else 0
                         d_wr = (daily_stats['wins'] / daily_stats['trades'] * 100) if daily_stats['trades'] > 0 else 0
                         start_str = total_stats['start_time'].strftime('%m/%d %H:%M')
@@ -229,7 +233,7 @@ if __name__ == "__main__":
     Thread(target=run_server, daemon=True).start()
     Thread(target=telegram_listener, daemon=True).start()
     
-    send_message("== 쿠퍼춘봉 스캘핑 봇 V7.1 가동 ==\n(💡 '/상태' 입력 시 시스템 및 잔고 종합 브리핑)")
+    send_message("== 업비트 봇 가동 시작 ==")
     
     valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
     target_list = get_elite_tickers()
