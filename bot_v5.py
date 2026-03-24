@@ -20,296 +20,210 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 스윙 및 모멘텀 추적 설정 (트레일링 스탑)
+# 2. 시스템 및 매매 설정
 # ==========================================
-TRAILING_ACTIVATE_ROI = 3.0   # 수익률이 3% 이상일 때 트레일링 스탑 가동
-TRAILING_DROP_RATE = 1.5      # 최고점 대비 1.5% 하락 시 모멘텀 종료로 판단 후 익절
-STOP_LOSS_ROI = -2.5          # 기본 손절률
-BLACKLIST_HOURS = 12          # 손절 시 쿨다운
+TRAILING_ACTIVATE_ROI = 1.5   # 1.5% 달성 시 트레일링(5분봉 5일선 추종) 가동
+STOP_LOSS_ROI = -1.5          # 기본 손절률 타이트하게 조정 (-1.5%)
+BUY_RATIO = 0.2               # 매수 비중 상향 (보유 원화의 20%)
+MAX_TICKERS = 15              # 최대 탐색 종목 수
 
-# 🔥 고점 추적을 위한 max_prices 딕셔너리 추가
 bot_state = {"loss_counts": {}, "blacklist_times": {}, "max_prices": {}} 
 daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()}
 total_stats = {"trades": 0, "wins": 0, "profit": 0.0, "start_time": datetime.datetime.now()}
 
 # ==========================================
-# 3. 🌐 가짜 웹 서버
+# 3. 🌐 Flask 가짜 웹 서버 (24시간 가동용)
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스윙 봇 V9.1 (트레일링 스탑 가동 중!) 🦅"
+    return "쿠퍼춘봉 스윙 봇 V9.2 (20% 비중 & 5MA 트레일링 가동 중!) 🦅"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # ==========================================
-# 4. 봇 핵심 로직
+# 4. 봇 핵심 유틸리티 함수
 # ==========================================
 def send_message(msg):
+    """텔레그램 메시지 전송"""
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         requests.get(url, params={"chat_id": telegram_chat_id, "text": msg})
-    except: pass
+    except Exception as e: 
+        print(f"텔레그램 전송 오류: {e}")
 
-def get_elite_tickers():
-    send_message("🔍 [시스템] Top-Down 다중 시간프레임 스크리닝 시작...")
+def get_elite_tickers(count=MAX_TICKERS):
+    """거래대금 상위 종목 동적 추출 (BTC 제외)"""
     try:
-        tickers = pyupbit.get_tickers(fiat="KRW")
         url = "https://api.upbit.com/v1/ticker"
         headers = {"accept": "application/json"}
-        response = requests.get(url, headers=headers, params={"markets": ",".join(tickers)})
-        data = response.json()
+        tickers = pyupbit.get_tickers(fiat="KRW")
         
-        candidates = sorted([item for item in data if item['acc_trade_price_24h'] > 10000000000], 
-                            key=lambda x: x['acc_trade_price_24h'], reverse=True)[:25]
-        top_tickers = [c['market'] for c in candidates]
+        # URL 길이가 길어질 수 있으므로 나누어 요청 후 합침
+        querystring = {"markets": ",".join(tickers)}
+        response = requests.get(url, headers=headers, params=querystring)
         
-        elite_tickers = []
-        for ticker in top_tickers:
-            time.sleep(0.1)
-            df_day = pyupbit.get_ohlcv(ticker, interval="day", count=60)
-            if df_day is None or len(df_day) < 60: continue
-            
-            ma20_day = df_day['close'].rolling(20).mean().iloc[-1]
-            ma60_day = df_day['close'].rolling(60).mean().iloc[-1]
-            curr_price = df_day['close'].iloc[-1]
-            
-            if curr_price > ma60_day and ma20_day > ma60_day:
-                elite_tickers.append(ticker)
-                
-            if len(elite_tickers) >= 10: break
-            
-        send_message(f"🎯 [스크리닝 완료] 스윙 타겟 {len(elite_tickers)}개 확보!")
-        return elite_tickers if elite_tickers else top_tickers[:5]
+        if response.status_code == 200:
+            data = response.json()
+            # 거래대금(acc_trade_price_24h) 기준 내림차순 정렬
+            sorted_data = sorted(data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
+            top_tickers = [item['market'] for item in sorted_data if item['market'] != "KRW-BTC"][:count]
+            return top_tickers
+        else:
+            return pyupbit.get_tickers(fiat="KRW")[:count] # API 오류 시 기본 티커 반환
     except Exception as e:
-        return pyupbit.get_tickers(fiat="KRW")[:10]
+        print(f"티커 로드 에러: {e}")
+        return ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-DOGE"]
 
-def sell_manager(valid_krw_tickers):
-    """🔥 모멘텀 추적(Trailing Stop) 및 단기 이평 이탈 매도 로직 반영"""
-    global daily_stats, total_stats, bot_state
-    now = datetime.datetime.now()
+def check_btc_volatility(threshold=2.0):
+    """대장주(비트코인) 급변동 휩쏘 필터"""
     try:
-        balances = upbit.get_balances()
-        if not balances: return "조회실패"
+        df = pyupbit.get_ohlcv("KRW-BTC", interval="minute15", count=3)
+        if df is None or len(df) < 3: return False 
         
-        holdings = []
-        for b in balances:
-            if b['currency'] != 'KRW' and float(b['balance']) + float(b['locked']) > 0:
-                ticker = f"KRW-{b['currency']}"
-                if ticker in valid_krw_tickers:
-                    holdings.append({
-                        'ticker': ticker,
-                        'balance': float(b['balance']) + float(b['locked']),
-                        'avg_buy_price': float(b['avg_buy_price'])
-                    })
-                
-        if not holdings: return "없음"
-
-        tickers_to_check = [h['ticker'] for h in holdings]
-        current_prices = pyupbit.get_current_price(tickers_to_check)
-        if not current_prices: return "가격로딩중"
-
-        display_info = []
-        for hold in holdings:
-            ticker = hold['ticker']
-            buy_price = hold['avg_buy_price']
-            balance = hold['balance']
-            if buy_price == 0: continue 
-            
-            curr_price = current_prices[ticker] if isinstance(current_prices, dict) else current_prices
-            roi = ((curr_price - buy_price) / buy_price) * 100
-            
-            # 1. 고점(Max Price) 갱신 로직
-            max_price = bot_state["max_prices"].get(ticker, buy_price)
-            if curr_price > max_price:
-                bot_state["max_prices"][ticker] = curr_price
-                max_price = curr_price
-            
-            max_roi = ((max_price - buy_price) / buy_price) * 100
-            drop_from_peak = ((max_price - curr_price) / max_price) * 100
-
-            sell_reason = ""
-
-            # 🚨 매도 조건 1: 트레일링 스탑 (수익 3% 이상 도달 후, 고점 대비 1.5% 하락 시)
-            if max_roi >= TRAILING_ACTIVATE_ROI and drop_from_peak >= TRAILING_DROP_RATE:
-                sell_reason = f"🚀 모멘텀 종료 (트레일링 익절: +{roi:.2f}%) / 최고수익: +{max_roi:.2f}%"
-
-            # 🚨 매도 조건 2: 단기 상승 추세 붕괴 (5분봉 5일선 이탈) - 수익권일 때만 발동
-            if not sell_reason and roi > 1.0:
-                df_5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=10)
-                if df_5 is not None and len(df_5) > 5:
-                    ma5 = df_5['close'].rolling(5).mean().iloc[-1]
-                    if curr_price < ma5:
-                        sell_reason = f"📉 5분봉 상승추세 붕괴 익절 (+{roi:.2f}%)"
-
-            # 🚨 매도 조건 3: 기본 손절 라인
-            if not sell_reason and roi <= STOP_LOSS_ROI:
-                sell_reason = f"❌ 스윙 지지선 이탈 손절 ({roi:.2f}%)"
-
-            if sell_reason and (balance * curr_price > 5000):
-                upbit.sell_market_order(ticker, balance)
-                profit_krw = (curr_price - buy_price) * balance
-                
-                daily_stats["trades"] += 1
-                total_stats["trades"] += 1
-                daily_stats["profit"] += profit_krw
-                total_stats["profit"] += profit_krw
-                
-                if roi > 0: 
-                    daily_stats["wins"] += 1
-                    total_stats["wins"] += 1
-                else:
-                    bot_state["blacklist_times"][ticker] = now
-                
-                # 매도 후 기록 삭제
-                bot_state["max_prices"].pop(ticker, None)
-                
-                send_message(f"💸 [{ticker}] 전량 매도\n- 사유: {sell_reason}")
-                continue 
-
-            display_info.append(f"[{ticker} {roi:+.2f}% (Max: {max_roi:+.2f}%)]")
-            
-        return " ".join(display_info) if display_info else "없음"
-    except Exception as e: 
-        return f"에러({e})"
-
-def buy_manager(ticker, krw_balance):
-    global bot_state
-    now = datetime.datetime.now()
-
-    blacklist_time = bot_state["blacklist_times"].get(ticker)
-    if blacklist_time and (now - blacklist_time).total_seconds() / 3600 < BLACKLIST_HOURS: return
-    if upbit.get_balance(ticker) > 0: return
-
-    df_60 = pyupbit.get_ohlcv(ticker, interval="minute60", count=60)
-    if df_60 is None or len(df_60) < 60: return
-    
-    df_60['ma22'] = df_60['close'].rolling(22).mean()
-    curr_60 = df_60.iloc[-1]
-    prev_60 = df_60.iloc[-2]
-    
-    trend_60m_ok = curr_60['ma22'] > prev_60['ma22']
-    
-    df_10 = pyupbit.get_ohlcv(ticker, interval="minute10", count=60)
-    if df_10 is None or len(df_10) < 60: return
-    
-    bb44_10 = ta.bbands(df_10['open'], length=44, std=2)
-    df_10 = pd.concat([df_10, bb44_10], axis=1)
-    lower_44_10m = df_10.columns[df_10.columns.str.contains('BBL')][0]
-    
-    curr_10 = df_10.iloc[-1]
-    
-    touch_bottom = curr_10['low'] <= curr_10[lower_44_10m]
-    
-    body = abs(curr_10['open'] - curr_10['close'])
-    lower_shadow = min(curr_10['open'], curr_10['close']) - curr_10['low']
-    hammer_candle = lower_shadow > (body * 1.5) and lower_shadow > 0
-    
-    if trend_60m_ok and touch_bottom and hammer_candle:
-        buy_amt = krw_balance * 0.30 
-        if buy_amt > 5000:
-            upbit.buy_market_order(ticker, buy_amt * 0.9995)
-            # 매수 직후 max_price 초기화
-            bot_state["max_prices"][ticker] = curr_10['close']
-            send_message(f"🚀 [{ticker}] 스윙 타점 포착!\n- 매수가: {curr_10['close']:,.0f}원\n- 다중시간 필터 통과 (트레일링 스탑 대기)")
+        max_price = df['high'].max()
+        min_price = df['low'].min()
+        volatility = ((max_price - min_price) / min_price) * 100
+        
+        if volatility >= threshold:
+            msg = f"🚨 [방어] 비트코인 급변동 감지 ({volatility:.2f}%). 알트코인 신규 진입을 일시 중단합니다."
+            print(msg)
+            # send_message(msg) # 너무 잦은 알림 방지를 위해 주석 처리
+            return False
+        return True
+    except Exception:
+        return False
 
 # ==========================================
-# 5. 텔레그램 명령어 수신
+# 5. 매수 / 매도 타점 로직 (pandas_ta 활용)
 # ==========================================
-def telegram_listener():
-    global total_stats, daily_stats
-    last_update_id = 0
+def check_buy_condition(ticker):
+    """ADX, DMI, MA5, RSI, 거래량 기반 매수 로직"""
+    try:
+        df = pyupbit.get_ohlcv(ticker, interval="minute15", count=100)
+        if df is None or len(df) < 20: return False
+
+        # pandas_ta를 활용한 깔끔한 지표 계산
+        df.ta.sma(length=5, append=True)
+        df.ta.rsi(length=14, append=True)
+        
+        # ADX 및 DMI 계산 (ADX_14, DMP_14, DMN_14 컬럼 생성)
+        adx_df = df.ta.adx(length=14)
+        if adx_df is not None:
+            df = pd.concat([df, adx_df], axis=1)
+        else:
+            return False
+
+        current_price = df['close'].iloc[-1]
+        ma5 = df['SMA_5'].iloc[-1]
+        rsi = df['RSI_14'].iloc[-1]
+        adx = df['ADX_14'].iloc[-1]
+        plus_di = df['DMP_14'].iloc[-1]
+        minus_di = df['DMN_14'].iloc[-1]
+        
+        current_volume = df['volume'].iloc[-1]
+        prev_volume = df['volume'].iloc[-2]
+
+        # 1. 상승 추세 확인 (5일선 위, 강한 트렌드, 매수세 우위)
+        is_trend_up = (current_price > ma5) and (adx > 25) and (plus_di > minus_di)
+        # 2. RSI 과열 방지
+        is_not_overbought = (rsi < 70)
+        # 3. 거래량 터진 모멘텀 확인
+        is_volume_spike = (current_volume > prev_volume * 1.5)
+
+        if is_trend_up and is_not_overbought and is_volume_spike:
+            return True
+        return False
+    except Exception as e:
+        print(f"[{ticker}] 매수 조건 확인 에러: {e}")
+        return False
+
+def check_sell_condition(ticker, buy_price, current_price):
+    """다이나믹 트레일링 스탑 및 손절매 로직"""
+    try:
+        profit_rate = ((current_price - buy_price) / buy_price) * 100
+
+        # 1. 트레일링 스탑 가동 (수익률이 1.5% 이상일 때)
+        if profit_rate >= TRAILING_ACTIVATE_ROI:
+            df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=10)
+            if df_5m is not None:
+                df_5m.ta.sma(length=5, append=True)
+                ma5_5m = df_5m['SMA_5'].iloc[-1]
+                
+                # 현재가가 5분봉의 5일선 아래로 꺾이면 익절 실행
+                if current_price < ma5_5m:
+                    return True, f"수익 극대화 트레일링 익절 (+{profit_rate:.2f}%)"
+            
+        # 2. 기본 손절매 (-1.5%)
+        elif profit_rate <= STOP_LOSS_ROI:
+            return True, f"손절매 방어 ({profit_rate:.2f}%)"
+            
+        return False, ""
+    except Exception as e:
+        print(f"[{ticker}] 매도 조건 확인 에러: {e}")
+        return False, ""
+
+# ==========================================
+# 6. 메인 실행 루프
+# ==========================================
+def main_loop():
+    send_message("🚀 쿠퍼춘봉 시스템 V9.2 정상 가동 시작!\n- 비중: 20%\n- 1.5% 트레일링 스탑 적용")
+    print("=======================================")
+    print("봇 가동 시작...")
+    print("=======================================")
+
     while True:
         try:
-            url = f"https://api.telegram.org/bot{telegram_token}/getUpdates"
-            params = {"offset": last_update_id + 1, "timeout": 10}
-            res = requests.get(url, params=params).json()
+            target_tickers = get_elite_tickers(count=MAX_TICKERS)
+            is_btc_stable = check_btc_volatility(threshold=2.0)
             
-            if res.get("ok"):
-                for item in res["result"]:
-                    last_update_id = item["update_id"]
-                    msg = item.get("message", {}).get("text", "")
+            if is_btc_stable:
+                for ticker in target_tickers:
+                    balance = upbit.get_balance(ticker)
+                    current_price = pyupbit.get_current_price(ticker)
                     
-                    if msg == "/상태" or msg.lower() == "/status":
-                        now = datetime.datetime.now()
-                        cpu_usage = psutil.cpu_percent(interval=0.1)
-                        ram_usage = psutil.virtual_memory().percent
-                        uptime_duration = now - total_stats['start_time']
-                        hours, remainder = divmod(uptime_duration.total_seconds(), 3600)
-                        minutes, seconds = divmod(remainder, 60)
-                        
-                        krw_balance = upbit.get_balance("KRW")
-                        krw_str = f"{krw_balance:,.0f}원" if krw_balance is not None else "조회 실패"
-                        
-                        wr = (total_stats['wins'] / total_stats['trades'] * 100) if total_stats['trades'] > 0 else 0
-                        d_wr = (daily_stats['wins'] / daily_stats['trades'] * 100) if daily_stats['trades'] > 0 else 0
-                        start_str = total_stats['start_time'].strftime('%m/%d %H:%M')
-                        
-                        reply = (
-                            f"🤖 [쿠퍼춘봉 시스템 브리핑]\n"
-                            f"⏱ 봇 가동: {start_str}\n"
-                            f"⏳ 구동 시간: {int(hours)}시간 {int(minutes)}분\n"
-                            f"💻 서버 상태: CPU {cpu_usage}% / RAM {ram_usage}%\n"
-                            f"💰 보유 KRW: {krw_str}\n\n"
-                            f"📈 [전체 누적 통계]\n"
-                            f"- 누적 수익: {total_stats['profit']:,.0f}원\n"
-                            f"- 누적 거래: {total_stats['trades']}회 (승률 {wr:.1f}%)\n\n"
-                            f"📅 [오늘 하루 통계]\n"
-                            f"- 오늘 수익: {daily_stats['profit']:,.0f}원\n"
-                            f"- 오늘 거래: {daily_stats['trades']}회 (승률 {d_wr:.1f}%)"
-                        )
-                        send_message(reply)
-        except: pass
-        time.sleep(2)
-
-# ==========================================
-# 6. 메인 실행부
-# ==========================================
-if __name__ == "__main__":
-    Thread(target=run_server, daemon=True).start()
-    Thread(target=telegram_listener, daemon=True).start()
-    
-    send_message("== 업비트 봇 가동 시작 ==")
-    
-    valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
-    target_list = get_elite_tickers()
-    last_screen_time = datetime.datetime.now()
-
-    while True:
-        try:
-            now = datetime.datetime.now()
+                    # [매수 포지션 진입]
+                    if balance == 0 or balance is None:
+                        if check_buy_condition(ticker):
+                            krw = upbit.get_balance("KRW")
+                            buy_amount = krw * BUY_RATIO # 20% 비중
+                            
+                            if buy_amount > 5000:
+                                upbit.buy_market_order(ticker, buy_amount)
+                                msg = f"✅ [매수] {ticker}\n- 매수가: {current_price:,.0f}원\n- 투입금액: {buy_amount:,.0f}원"
+                                print(msg)
+                                send_message(msg)
+                                time.sleep(0.5)
+                                
+                    # [매도 포지션 관리]
+                    else:
+                        avg_buy_price = upbit.get_avg_buy_price(ticker)
+                        if avg_buy_price > 0 and current_price is not None:
+                            should_sell, reason = check_sell_condition(ticker, avg_buy_price, current_price)
+                            
+                            if should_sell:
+                                upbit.sell_market_order(ticker, balance)
+                                profit = ((current_price - avg_buy_price) / avg_buy_price) * 100
+                                msg = f"💰 [매도] {ticker}\n- 매도사유: {reason}\n- 수익률: {profit:.2f}%"
+                                print(msg)
+                                send_message(msg)
+                                time.sleep(0.5)
             
-            if (now - last_screen_time).total_seconds() >= 7200:
-                target_list = get_elite_tickers()
-                last_screen_time = now
+            time.sleep(1) # API 과부하 방지
             
-            if daily_stats["date"] != now.date():
-                wr = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
-                send_message(f"📅 일일 결산 [{daily_stats['date']}]\n- 거래: {daily_stats['trades']}회\n- 승률: {wr:.1f}%\n- 수익: {daily_stats['profit']:,.0f}원")
-                daily_stats.update({"trades": 0, "wins": 0, "profit": 0.0, "date": now.date()})
-                bot_state["loss_counts"] = {}
-                bot_state["blacklist_times"] = {}
-                valid_krw_tickers = pyupbit.get_tickers(fiat="KRW")
-                
-                target_list = get_elite_tickers()
-                last_screen_time = now
-
-            for ticker in target_list:
-                krw = upbit.get_balance("KRW")
-                if krw is None:
-                    time.sleep(5)
-                    continue
-
-                holdings_str = sell_manager(valid_krw_tickers)
-                
-                # 터미널 화면에도 최고 수익률(Max)을 함께 표시하여 추적 상황을 볼 수 있게 했습니다.
-                sys.stdout.write(f"\r[{now.strftime('%H:%M:%S')}] 보유: {holdings_str} | 타겟: {ticker} | 잔고: {krw:,.0f}원    ")
-                sys.stdout.flush()
-                
-                if krw > 5000: buy_manager(ticker, krw)
-                time.sleep(0.3) 
-
         except Exception as e:
-            time.sleep(5)
+            msg = f"⚠️ [시스템 에러] {e}"
+            print(msg)
+            # send_message(msg)
+            time.sleep(10)
+
+if __name__ == "__main__":
+    # Flask 서버 스레드 실행
+    server_thread = Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    
+    # 봇 메인 루프 실행
+    main_loop()
