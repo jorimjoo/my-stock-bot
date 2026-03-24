@@ -19,7 +19,17 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 시스템 및 매매 설정 (오리지널 로직 원복)
+# 2. 한국 시간 강제 변환 함수 (핵심 수정)
+# ==========================================
+def get_kst():
+    """
+    서버의 환경(타임존) 설정과 무관하게, 
+    순수 세계 표준시(UTC)를 가져와 강제로 9시간을 더해 완벽한 KST를 반환합니다.
+    """
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+
+# ==========================================
+# 3. 시스템 및 매매 설정
 # ==========================================
 TRAILING_ACTIVATE_ROI = 1.5   # 1.5% 이상 수익 시 트레일링 가동
 TRAILING_DROP_RATE = 1.0      # 최고점 대비 1.0% 하락 시 익절
@@ -29,10 +39,6 @@ BUY_RATIO = 0.2               # 매수 비중 (20%)
 MAX_TICKERS = 15              # 최대 탐색 종목 수
 REPORT_INTERVAL = 3600        # 브리핑 간격 (1시간)
 
-# 한국 시간(KST) 강제 적용을 위한 타임존 설정
-KST = datetime.timezone(datetime.timedelta(hours=9))
-
-# 오리지널 상태 관리 변수 원복
 bot_state = {
     "loss_counts": {}, 
     "blacklist_times": {}, 
@@ -40,23 +46,24 @@ bot_state = {
     "last_report_time": 0
 }
 
-daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now(KST).date()}
-total_stats = {"trades": 0, "wins": 0, "profit": 0.0, "start_time": datetime.datetime.now(KST)}
+# 모든 통계 시작 시간을 get_kst()로 고정
+daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": get_kst().date()}
+total_stats = {"trades": 0, "wins": 0, "profit": 0.0, "start_time": get_kst()}
 
 # ==========================================
-# 3. 🌐 Flask 가짜 웹 서버
+# 4. 🌐 Flask 가짜 웹 서버
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스윙 봇 V9.4 (오류 수정 및 오리지널 로직 복구 완료!) 🦅"
+    return "쿠퍼춘봉 스윙 봇 V9.5 (시간 동기화 완벽 패치!) 🦅"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # ==========================================
-# 4. 유틸리티 함수 (KST 시간 적용)
+# 5. 유틸리티 함수 (알림 및 상태)
 # ==========================================
 def send_message(msg):
     try:
@@ -69,7 +76,7 @@ def get_server_status():
     return psutil.cpu_percent(), psutil.virtual_memory().percent
 
 def send_system_briefing():
-    now = datetime.datetime.now(KST)
+    now = get_kst()
     uptime = now - total_stats["start_time"]
     days, seconds = uptime.days, uptime.seconds
     hours = seconds // 3600
@@ -99,7 +106,7 @@ def send_system_briefing():
 
 def update_statistics(profit_amount, is_win):
     global daily_stats, total_stats
-    now_date = datetime.datetime.now(KST).date()
+    now_date = get_kst().date()
     
     if daily_stats["date"] != now_date:
         daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": now_date}
@@ -110,16 +117,14 @@ def update_statistics(profit_amount, is_win):
         if is_win: stats["wins"] += 1
 
 # ==========================================
-# 5. 핵심 매매 로직 (API 원복)
+# 6. 핵심 매매 로직
 # ==========================================
 def get_elite_tickers(count=MAX_TICKERS):
-    """오리지널 REST API 방식 복구 (정상 작동)"""
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
         url = "https://api.upbit.com/v1/ticker"
         headers = {"accept": "application/json"}
         
-        # URL 길이 제한을 피해 50개씩 끊어서 요청
         all_data = []
         for i in range(0, len(tickers), 50):
             batch = tickers[i:i+50]
@@ -145,7 +150,6 @@ def check_btc_volatility():
     except: return False
 
 def check_buy_condition(ticker):
-    # 블랙리스트(쿨다운) 종목 필터링
     if ticker in bot_state["blacklist_times"]:
         if time.time() < bot_state["blacklist_times"][ticker]: return False
         else: del bot_state["blacklist_times"][ticker]
@@ -166,7 +170,6 @@ def check_buy_condition(ticker):
         p_di = df['DMP_14'].iloc[-1]
         m_di = df['DMN_14'].iloc[-1]
         
-        # 거래량 필터를 1.5배 -> 1.2배로 소폭 완화 (너무 잦은 매수 패스 방지)
         v_spike = df['volume'].iloc[-1] > df['volume'].iloc[-2] * 1.2 
         
         if (c > ma) and (adx_v > 25) and (p_di > m_di) and (rsi < 70) and v_spike:
@@ -175,10 +178,8 @@ def check_buy_condition(ticker):
     except: return False
 
 def check_sell_condition(ticker, buy_price, current_price):
-    """고점 추적 다이나믹 트레일링 스탑 (오리지널 복구)"""
     profit_rate = ((current_price - buy_price) / buy_price) * 100
 
-    # 1. 최고점 갱신 로직
     if ticker not in bot_state["max_prices"]:
         bot_state["max_prices"][ticker] = buy_price
         
@@ -188,26 +189,23 @@ def check_sell_condition(ticker, buy_price, current_price):
     max_price = bot_state["max_prices"][ticker]
     drop_from_max = ((max_price - current_price) / max_price) * 100
 
-    # 2. 익절 조건 (1.5% 이상 도달 후 고점 대비 1.0% 하락 시)
     if profit_rate >= TRAILING_ACTIVATE_ROI:
         if drop_from_max >= TRAILING_DROP_RATE:
             del bot_state["max_prices"][ticker]
             return True, f"고점 트레일링 익절 (+{profit_rate:.2f}%)"
             
-    # 3. 손절 조건 (-1.5%)
     elif profit_rate <= STOP_LOSS_ROI:
         if ticker in bot_state["max_prices"]: del bot_state["max_prices"][ticker]
-        # 손절 시 블랙리스트 추가 (1시간 동안 재진입 금지)
         bot_state["blacklist_times"][ticker] = time.time() + (3600 * BLACKLIST_HOURS)
         return True, f"손절 방어 ({profit_rate:.2f}%)"
         
     return False, ""
 
 # ==========================================
-# 6. 메인 실행 루프
+# 7. 메인 실행 루프
 # ==========================================
 def main_loop():
-    send_message("🚀 쿠퍼춘봉 시스템 V9.4 가동!\n- 시간 동기화(KST) 및 오리지널 로직 원복 완료")
+    send_message(f"🚀 쿠퍼춘봉 시스템 V9.5 가동!\n- KST 시간 강제 고정 완료 ({get_kst().strftime('%H:%M')})")
     print("=======================================")
     print("안정화 버전 가동 시작...")
     print("=======================================")
@@ -224,8 +222,7 @@ def main_loop():
             if check_btc_volatility():
                 target_tickers = get_elite_tickers()
                 
-                # 로그 출력 (한국 시간 적용)
-                current_time_str = datetime.datetime.now(KST).strftime('%H:%M:%S')
+                current_time_str = get_kst().strftime('%H:%M:%S')
                 if target_tickers:
                     print(f"[{current_time_str}] 정상 탐색 중... 상위: {', '.join(target_tickers[:3])}")
                 
