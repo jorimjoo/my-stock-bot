@@ -19,20 +19,29 @@ telegram_token = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 telegram_chat_id = "8403406400"
 
 # ==========================================
-# 2. 시스템 및 매매 설정
+# 2. 시스템 및 매매 설정 (오리지널 로직 원복)
 # ==========================================
-TRAILING_ACTIVATE_ROI = 1.5   # 1.5% 달성 시 트레일링 가동
-STOP_LOSS_ROI = -1.5          # 손절률 (-1.5%)
+TRAILING_ACTIVATE_ROI = 1.5   # 1.5% 이상 수익 시 트레일링 가동
+TRAILING_DROP_RATE = 1.0      # 최고점 대비 1.0% 하락 시 익절
+STOP_LOSS_ROI = -1.5          # 기본 손절률
+BLACKLIST_HOURS = 1           # 손절 시 1시간 쿨다운 (재진입 방지)
 BUY_RATIO = 0.2               # 매수 비중 (20%)
 MAX_TICKERS = 15              # 최대 탐색 종목 수
-REPORT_INTERVAL = 3600        # 브리핑 간격 (3600초 = 1시간)
+REPORT_INTERVAL = 3600        # 브리핑 간격 (1시간)
 
-# 통계 및 상태 관리 변수
+# 한국 시간(KST) 강제 적용을 위한 타임존 설정
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
+# 오리지널 상태 관리 변수 원복
 bot_state = {
-    "daily_stats": {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now().date()},
-    "total_stats": {"trades": 0, "wins": 0, "profit": 0.0, "start_time": datetime.datetime.now()},
+    "loss_counts": {}, 
+    "blacklist_times": {}, 
+    "max_prices": {},
     "last_report_time": 0
 }
+
+daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": datetime.datetime.now(KST).date()}
+total_stats = {"trades": 0, "wins": 0, "profit": 0.0, "start_time": datetime.datetime.now(KST)}
 
 # ==========================================
 # 3. 🌐 Flask 가짜 웹 서버
@@ -41,29 +50,27 @@ app = Flask(__name__)
 
 @app.route('/')
 def keep_alive():
-    return "쿠퍼춘봉 스윙 봇 V9.3 정상 구동 중! 🦅"
+    return "쿠퍼춘봉 스윙 봇 V9.4 (오류 수정 및 오리지널 로직 복구 완료!) 🦅"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # ==========================================
-# 4. 유틸리티 함수
+# 4. 유틸리티 함수 (KST 시간 적용)
 # ==========================================
 def send_message(msg):
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         requests.get(url, params={"chat_id": telegram_chat_id, "text": msg}, timeout=5)
-    except: pass
+    except Exception as e:
+        print(f"텔레그램 전송 실패: {e}")
 
 def get_server_status():
-    cpu = psutil.cpu_percent()
-    ram = psutil.virtual_memory().percent
-    return cpu, ram
+    return psutil.cpu_percent(), psutil.virtual_memory().percent
 
 def send_system_briefing():
-    """스크린샷 스타일의 시스템 브리핑 전송"""
-    now = datetime.datetime.now()
-    uptime = now - bot_state["total_stats"]["start_time"]
+    now = datetime.datetime.now(KST)
+    uptime = now - total_stats["start_time"]
     days, seconds = uptime.days, uptime.seconds
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
@@ -71,83 +78,83 @@ def send_system_briefing():
     cpu, ram = get_server_status()
     krw_balance = upbit.get_balance("KRW")
     
-    t_stats = bot_state["total_stats"]
-    d_stats = bot_state["daily_stats"]
-    
-    total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
-    daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
+    total_win_rate = (total_stats["wins"] / total_stats["trades"] * 100) if total_stats["trades"] > 0 else 0
+    daily_win_rate = (daily_stats["wins"] / daily_stats["trades"] * 100) if daily_stats["trades"] > 0 else 0
     
     msg = f"🤖 [쿠퍼춘봉 시스템 브리핑]\n"
-    msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
+    msg += f"⌚ 봇 가동: {total_stats['start_time'].strftime('%m/%d %H:%M')}\n"
     msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
     msg += f"💻 서버 상태: CPU {cpu}% / RAM {ram}%\n"
     msg += f"💰 보유 KRW: {krw_balance:,.0f}원\n\n"
     
     msg += f"📈 [전체 누적 통계]\n"
-    msg += f"- 누적 수익: {t_stats['profit']:,.0f}원\n"
-    msg += f"- 누적 거래: {t_stats['trades']}회 (승률 {total_win_rate:.1f}%)\n\n"
+    msg += f"- 누적 수익: {total_stats['profit']:,.0f}원\n"
+    msg += f"- 누적 거래: {total_stats['trades']}회 (승률 {total_win_rate:.1f}%)\n\n"
     
     msg += f"📅 [오늘 하루 통계]\n"
-    msg += f"- 오늘 수익: {d_stats['profit']:,.0f}원\n"
-    msg += f"- 오늘 거래: {d_stats['trades']}회 (승률 {daily_win_rate:.1f}%)"
+    msg += f"- 오늘 수익: {daily_stats['profit']:,.0f}원\n"
+    msg += f"- 오늘 거래: {daily_stats['trades']}회 (승률 {daily_win_rate:.1f}%)"
     
     send_message(msg)
-    print(f"[{now}] 시스템 브리핑 전송 완료.")
 
 def update_statistics(profit_amount, is_win):
-    now_date = datetime.datetime.now().date()
-    if bot_state["daily_stats"]["date"] != now_date:
-        bot_state["daily_stats"] = {"trades": 0, "wins": 0, "profit": 0.0, "date": now_date}
+    global daily_stats, total_stats
+    now_date = datetime.datetime.now(KST).date()
     
-    for key in ["daily_stats", "total_stats"]:
-        bot_state[key]["trades"] += 1
-        bot_state[key]["profit"] += profit_amount
-        if is_win: bot_state[key]["wins"] += 1
+    if daily_stats["date"] != now_date:
+        daily_stats = {"trades": 0, "wins": 0, "profit": 0.0, "date": now_date}
+    
+    for stats in [daily_stats, total_stats]:
+        stats["trades"] += 1
+        stats["profit"] += profit_amount
+        if is_win: stats["wins"] += 1
 
 # ==========================================
-# 5. 매매 핵심 로직 (수정 완료)
+# 5. 핵심 매매 로직 (API 원복)
 # ==========================================
 def get_elite_tickers(count=MAX_TICKERS):
-    """거래대금 상위 종목 추출 로직 수정"""
+    """오리지널 REST API 방식 복구 (정상 작동)"""
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
-        # 한 번에 모든 종목 정보 가져오기
-        data = pyupbit.get_current_price(tickers, verbose=True)
+        url = "https://api.upbit.com/v1/ticker"
+        headers = {"accept": "application/json"}
         
-        # 데이터가 딕셔너리 형태로 오므로 items()를 사용하여 정렬
-        sorted_tickers = sorted(data.items(), key=lambda x: x[1]['acc_trade_price_24h'], reverse=True)
-        
-        top_list = []
-        for ticker, info in sorted_tickers:
-            if ticker != "KRW-BTC":
-                top_list.append(ticker)
-            if len(top_list) >= count:
-                break
-        return top_list
+        # URL 길이 제한을 피해 50개씩 끊어서 요청
+        all_data = []
+        for i in range(0, len(tickers), 50):
+            batch = tickers[i:i+50]
+            querystring = {"markets": ",".join(batch)}
+            response = requests.get(url, headers=headers, params=querystring)
+            if response.status_code == 200:
+                all_data.extend(response.json())
+            time.sleep(0.1)
+            
+        sorted_data = sorted(all_data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
+        return [item['market'] for item in sorted_data if item['market'] != "KRW-BTC"][:count]
     except Exception as e:
-        print(f"종목 추출 중 오류: {e}")
-        return ["KRW-ETH", "KRW-XRP", "KRW-SOL"]
+        print(f"종목 조회 에러: {e}")
+        return []
 
 def check_btc_volatility():
-    """비트코인 휩쏘 방어 필터"""
     try:
         df = pyupbit.get_ohlcv("KRW-BTC", interval="minute15", count=3)
         if df is None: return False
         vol = ((df['high'].max() - df['low'].min()) / df['low'].min()) * 100
-        if vol >= 2.0:
-            print(f"!! 비트코인 변동성 과다 ({vol:.2f}%) - 매매 일시 중단")
-            return False
+        if vol >= 2.0: return False
         return True
     except: return False
 
 def check_buy_condition(ticker):
-    """매수 타점 상세 로그 추가"""
+    # 블랙리스트(쿨다운) 종목 필터링
+    if ticker in bot_state["blacklist_times"]:
+        if time.time() < bot_state["blacklist_times"][ticker]: return False
+        else: del bot_state["blacklist_times"][ticker]
+
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute15", count=50)
         if df is None or len(df) < 20: return False
         
-        df.ta.sma(length=5, append=True)
-        df.ta.rsi(length=14, append=True)
+        df.ta.sma(length=5, append=True); df.ta.rsi(length=14, append=True)
         adx = df.ta.adx(length=14)
         if adx is None: return False
         df = pd.concat([df, adx], axis=1)
@@ -158,58 +165,75 @@ def check_buy_condition(ticker):
         adx_v = df['ADX_14'].iloc[-1]
         p_di = df['DMP_14'].iloc[-1]
         m_di = df['DMN_14'].iloc[-1]
-        v_spike = df['volume'].iloc[-1] > df['volume'].iloc[-2] * 1.5 # 1.5배 거래량 폭증
         
-        # 조건 검사
-        cond1 = c > ma
-        cond2 = adx_v > 25
-        cond3 = p_di > m_di
-        cond4 = rsi < 70
-        cond5 = v_spike
+        # 거래량 필터를 1.5배 -> 1.2배로 소폭 완화 (너무 잦은 매수 패스 방지)
+        v_spike = df['volume'].iloc[-1] > df['volume'].iloc[-2] * 1.2 
         
-        if cond1 and cond2 and cond3 and cond4 and cond5:
+        if (c > ma) and (adx_v > 25) and (p_di > m_di) and (rsi < 70) and v_spike:
             return True
         return False
     except: return False
 
 def check_sell_condition(ticker, buy_price, current_price):
+    """고점 추적 다이나믹 트레일링 스탑 (오리지널 복구)"""
     profit_rate = ((current_price - buy_price) / buy_price) * 100
+
+    # 1. 최고점 갱신 로직
+    if ticker not in bot_state["max_prices"]:
+        bot_state["max_prices"][ticker] = buy_price
+        
+    if current_price > bot_state["max_prices"][ticker]:
+        bot_state["max_prices"][ticker] = current_price
+        
+    max_price = bot_state["max_prices"][ticker]
+    drop_from_max = ((max_price - current_price) / max_price) * 100
+
+    # 2. 익절 조건 (1.5% 이상 도달 후 고점 대비 1.0% 하락 시)
     if profit_rate >= TRAILING_ACTIVATE_ROI:
-        df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=10)
-        if df_5m is not None:
-            df_5m.ta.sma(length=5, append=True)
-            if current_price < df_5m['SMA_5'].iloc[-1]:
-                return True, f"트레일링 익절 (+{profit_rate:.2f}%)"
+        if drop_from_max >= TRAILING_DROP_RATE:
+            del bot_state["max_prices"][ticker]
+            return True, f"고점 트레일링 익절 (+{profit_rate:.2f}%)"
+            
+    # 3. 손절 조건 (-1.5%)
     elif profit_rate <= STOP_LOSS_ROI:
+        if ticker in bot_state["max_prices"]: del bot_state["max_prices"][ticker]
+        # 손절 시 블랙리스트 추가 (1시간 동안 재진입 금지)
+        bot_state["blacklist_times"][ticker] = time.time() + (3600 * BLACKLIST_HOURS)
         return True, f"손절 방어 ({profit_rate:.2f}%)"
+        
     return False, ""
 
 # ==========================================
-# 6. 메인 루프 (로그 강화)
+# 6. 메인 실행 루프
 # ==========================================
 def main_loop():
-    send_message("🚀 쿠퍼춘봉 시스템 V9.3 정상 가동 시작!\n(로직 수정 및 실시간 로그 강화)")
-    print("쿠퍼춘봉 봇 가동 중... (Ctrl+C로 중단)")
+    send_message("🚀 쿠퍼춘봉 시스템 V9.4 가동!\n- 시간 동기화(KST) 및 오리지널 로직 원복 완료")
+    print("=======================================")
+    print("안정화 버전 가동 시작...")
+    print("=======================================")
     
+    bot_state["last_report_time"] = time.time()
+
     while True:
         try:
             now_ts = time.time()
-            # 1. 브리핑 타이머 체크
             if now_ts - bot_state["last_report_time"] > REPORT_INTERVAL:
                 send_system_briefing()
                 bot_state["last_report_time"] = now_ts
 
-            # 2. 시장 상태 확인
             if check_btc_volatility():
                 target_tickers = get_elite_tickers()
-                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 탐색 중: {', '.join(target_tickers[:5])}...")
+                
+                # 로그 출력 (한국 시간 적용)
+                current_time_str = datetime.datetime.now(KST).strftime('%H:%M:%S')
+                if target_tickers:
+                    print(f"[{current_time_str}] 정상 탐색 중... 상위: {', '.join(target_tickers[:3])}")
                 
                 for ticker in target_tickers:
                     balance = upbit.get_balance(ticker)
                     curr_p = pyupbit.get_current_price(ticker)
                     
                     if balance == 0 or balance is None:
-                        # 매수 탐색
                         if check_buy_condition(ticker):
                             krw = upbit.get_balance("KRW")
                             buy_amt = krw * BUY_RATIO
@@ -217,23 +241,20 @@ def main_loop():
                                 upbit.buy_market_order(ticker, buy_amt)
                                 send_message(f"✅ [매수] {ticker}\n금액: {buy_amt:,.0f}원")
                     else:
-                        # 매도 탐색
                         avg_p = upbit.get_avg_buy_price(ticker)
-                        should_sell, reason = check_sell_condition(ticker, avg_p, curr_p)
-                        if should_sell:
-                            upbit.sell_market_order(ticker, balance)
-                            profit_amt = (curr_p - avg_p) * balance
-                            update_statistics(profit_amt, (curr_p > avg_p))
-                            send_message(f"💰 [매도] {ticker}\n사유: {reason}\n수익: {profit_amt:,.0f}원")
-                    time.sleep(0.1) # 종목간 딜레이
-            
+                        if avg_p > 0 and curr_p is not None:
+                            should_sell, reason = check_sell_condition(ticker, avg_p, curr_p)
+                            if should_sell:
+                                upbit.sell_market_order(ticker, balance)
+                                profit_amt = (curr_p - avg_p) * balance
+                                update_statistics(profit_amt, (curr_p > avg_p))
+                                send_message(f"💰 [매도] {ticker}\n사유: {reason}\n수익: {profit_amt:,.0f}원")
+                    time.sleep(0.1)
             time.sleep(1)
         except Exception as e:
-            print(f"루프 에러: {e}")
+            print(f"시스템 에러: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    # 웹 서버 시작
     Thread(target=run_server, daemon=True).start()
-    # 봇 시작
     main_loop()
