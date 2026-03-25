@@ -79,7 +79,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 V14 AI 트레이딩 봇 (기존 잔고 연동 완료) 가동중"
+    return "🚀 V14 AI 트레이딩 봇 가동중"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
@@ -87,12 +87,14 @@ def run_server():
 def send_msg(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.get(url, params={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
-    except:
-        pass
+        res = requests.get(url, params={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
+        if res.status_code != 200:
+            print(f"텔레그램 발송 실패 (코드: {res.status_code})")
+    except Exception as e:
+        print(f"텔레그램 발송 네트워크 에러: {e}")
 
 def telegram_polling():
-    """'/상태' 명령어 응답 스레드"""
+    """'/상태' 명령어 응답 스레드 (강력한 예외 처리 적용)"""
     last_update_id = None
     while True:
         try:
@@ -101,12 +103,17 @@ def telegram_polling():
             if last_update_id:
                 params["offset"] = last_update_id
             res = requests.get(url, params=params, timeout=15)
+            
             if res.status_code == 200:
                 for item in res.json().get("result", []):
                     last_update_id = item["update_id"] + 1
-                    if item.get("message", {}).get("text", "") == "/상태":
+                    msg_text = str(item.get("message", {}).get("text", "")).strip()
+                    
+                    if "/상태" in msg_text:
+                        print(f"[{get_kst().strftime('%H:%M:%S')}] '/상태' 명령어 수신. 브리핑 전송합니다.")
                         send_system_briefing()
-        except: pass
+        except Exception as e: 
+            print(f"텔레그램 수신 에러: {e}")
         time.sleep(2)
 
 def check_daily_reset():
@@ -115,29 +122,38 @@ def check_daily_reset():
         bot["daily_stats"] = {"trades": 0, "wins": 0, "profit": 0.0, "date": now_date}
 
 def send_system_briefing():
-    """1시간 주기 / 명령어 브리핑 보고"""
-    check_daily_reset()
-    now = get_kst()
-    uptime = now - bot["total_stats"]["start_time"]
-    days, seconds = uptime.days, uptime.seconds
-    hours = seconds // 3600; minutes = (seconds % 3600) // 60
-    
-    try: cpu = psutil.cpu_percent(interval=None); ram = psutil.virtual_memory().percent
-    except: cpu, ram = 0.0, 0.0
+    """1시간 주기 / 명령어 브리핑 보고 (에러 방지 3중 처리)"""
+    try:
+        check_daily_reset()
+        now = get_kst()
+        uptime = now - bot["total_stats"]["start_time"]
+        days, seconds = uptime.days, uptime.seconds
+        hours = seconds // 3600; minutes = (seconds % 3600) // 60
         
-    krw_balance = upbit.get_balance("KRW")
-    t_stats, d_stats = bot["total_stats"], bot["daily_stats"]
-    total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
-    daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
-    
-    msg = f"🐶 [쿠퍼춘봉 V14 AI 브리핑]\n"
-    msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
-    msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
-    msg += f"💻 서버 상태: CPU {cpu}% / RAM {ram}%\n"
-    msg += f"💰 보유 KRW: {krw_balance:,.0f}원\n\n"
-    msg += f"📈 [전체 누적 통계]\n- 수익: {t_stats['profit']:,.0f}원\n- 거래: {t_stats['trades']}회 (승률 {total_win_rate:.1f}%)\n\n"
-    msg += f"📅 [오늘 하루 통계]\n- 수익: {d_stats['profit']:,.0f}원\n- 거래: {d_stats['trades']}회 (승률 {daily_win_rate:.1f}%)"
-    send_msg(msg)
+        try: cpu = psutil.cpu_percent(interval=None); ram = psutil.virtual_memory().percent
+        except: cpu, ram = 0.0, 0.0
+            
+        try: 
+            krw_balance = float(upbit.get_balance("KRW") or 0.0)
+        except: 
+            krw_balance = 0.0
+            
+        t_stats, d_stats = bot["total_stats"], bot["daily_stats"]
+        total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
+        daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
+        
+        msg = f"🐶 [쿠퍼춘봉 V14 AI 브리핑]\n"
+        msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
+        msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
+        msg += f"💻 서버 상태: CPU {cpu}% / RAM {ram}%\n"
+        msg += f"💰 보유 KRW: {krw_balance:,.0f}원\n\n"
+        msg += f"📈 [전체 누적 통계]\n- 수익: {t_stats['profit']:,.0f}원\n- 거래: {t_stats['trades']}회 (승률 {total_win_rate:.1f}%)\n\n"
+        msg += f"📅 [오늘 하루 통계]\n- 수익: {d_stats['profit']:,.0f}원\n- 거래: {d_stats['trades']}회 (승률 {daily_win_rate:.1f}%)"
+        
+        send_msg(msg)
+        print(f"[{get_kst().strftime('%H:%M:%S')}] 시스템 브리핑 발송 완료")
+    except Exception as e:
+        print(f"브리핑 발송 중 치명적 에러 발생 (봇 멈춤 방지): {e}")
 
 def update_statistics(profit_krw, is_win):
     check_daily_reset()
@@ -190,7 +206,7 @@ def get_top_coins():
             batch = tickers[i:i+50]
             res = requests.get(url, headers={"accept": "application/json"}, params={"markets": ",".join(batch)})
             if res.status_code == 200: all_data.extend(res.json())
-            time.sleep(0.1)
+            time.sleep(0.1) 
         
         scored_data = []
         for item in all_data:
@@ -293,10 +309,9 @@ def sell_logic(ticker, avg_price, current_price, balance):
         send_msg(f"😭 손절 {ticker} ({profit:.2f}%) / 손실: {krw_profit:,.0f}원")
 
 # =========================
-# 8. 💡 기존 잔고 동기화 로직 (신규 추가)
+# 8. 기존 보유 잔고 동기화 (봇 가동 시 단 1회)
 # =========================
 def sync_existing_positions():
-    """봇 가동 시 계좌에 이미 있는 코인을 봇의 관리 목록(bot["positions"])에 등록"""
     try:
         my_balances = upbit.get_balances()
         count = 0
@@ -309,9 +324,8 @@ def sync_existing_positions():
                 
                 if balance > 0 and avg_buy_price > 0:
                     ticker = f"KRW-{b['currency']}"
-                    # 기존 보유 코인은 'stage: 2'로 설정하여 무리한 2차 물타기를 방지하고 익절/손절 관리에 집중함
                     bot["positions"][ticker] = {
-                        "stage": 2, 
+                        "stage": 2, # 무리한 물타기 방지
                         "half_sold": False,
                         "buy_price": avg_buy_price
                     }
@@ -325,13 +339,13 @@ def sync_existing_positions():
 # 9. 메인 루프
 # =========================
 def main():
-    # 가동 시 기존 계좌 잔고를 스캔하여 봇에 연동
     synced_count = sync_existing_positions()
     
     start_msg = f"🚀 V14 AI 트레이딩 봇 시작 ({get_kst().strftime('%m/%d %H:%M')})\n"
     start_msg += f"✅ 기존 보유 종목 {synced_count}개 연동 완료!"
     send_msg(start_msg)
     
+    # 여기서 에러가 나도 메인 루프가 죽지 않도록 내부에서 예외처리를 강화함
     send_system_briefing()
     bot["last_report_time"] = time.time()
 
@@ -346,7 +360,6 @@ def main():
                 continue
 
             tickers = get_top_coins()
-            
             all_prices = pyupbit.get_current_price(tickers) 
             my_balances = upbit.get_balances()              
             
@@ -366,7 +379,7 @@ def main():
             for ticker in tickers:
                 if ticker in bot["blacklist"] and time.time() < bot["blacklist"][ticker]: continue
                 
-                price = all_prices.get(ticker, 0.0)
+                price = all_prices.get(ticker, 0.0) if all_prices else 0.0
                 coin_data = balance_dict.get(ticker, {"balance": 0.0, "avg_buy_price": 0.0})
                 balance = coin_data["balance"]
                 avg = coin_data["avg_buy_price"]
@@ -388,7 +401,6 @@ def main():
                 # --- 보유 종목 관리 (물타기 & 매도) ---
                 else:
                     if avg > 0 and price > 0:
-                        # 2차 매수 (물타기) - 기존 연동 종목은 stage가 2이므로 패스됨
                         if ticker in bot["positions"]:
                             pos = bot["positions"][ticker]
                             if pos["stage"] == 1:
@@ -407,7 +419,8 @@ def main():
                 time.sleep(0.2) 
                 
         except Exception as e:
-            print("에러:", e); time.sleep(5)
+            print(f"메인 루프 에러: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     Thread(target=run_server, daemon=True).start()
