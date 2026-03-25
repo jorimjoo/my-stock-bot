@@ -9,7 +9,7 @@ from flask import Flask
 from threading import Thread
 
 # =========================
-# 1. API 키 및 텔레그램 설정 (직접 입력 반영)
+# 1. API 키 및 텔레그램 설정
 # =========================
 ACCESS_KEY = "1MUrRTR1vfHUP4Ru1Ax5UgYk2dTCHesiOUCysR6Z"
 SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
@@ -35,10 +35,14 @@ TRAILING_START = 3.0        # 3.0% 수익 시 트레일링 스탑 가동
 TRAILING_DROP = 0.8         # 최고점 대비 0.8% 하락 시 전량 익절
 STOP_LOSS = -1.2            # 기본 손절률 (-1.2%)
 
+# 💡 [수정됨] 횡보 탈출 로직 기준 완화
+STAGNANT_PROFIT = 1.0       # 횡보 익절 발동 최소 수익률 (1.0%)
+STAGNANT_VOLATILITY = 0.7   # 횡보 판단 기준: 5분봉 3개 변동폭 0.7% 이하
+
 BLACKLIST_HOURS = 1         # 손절 시 1시간 진입 금지
 REPORT_INTERVAL = 3600      # 1시간 주기로 자동 브리핑 전송
 
-# 봇 상태 및 통계 관리 딕셔너리 완벽 통합
+# 봇 상태 및 통계 관리 딕셔너리
 bot = {
     "positions": {},   # ticker별 상태 (stage, half_sold, buy_price)
     "blacklist": {},
@@ -55,13 +59,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 V12 공격형 통합 봇 (쿠퍼춘봉 에디션) 가동중"
+    return "🚀 V12 공격형 통합 봇 (횡보 탈출 최적화) 가동중"
 
 def run_server():
     app.run(host='0.0.0.0', port=10000)
 
 # =========================
-# 5. 텔레그램 통신 및 브리핑 로직 (V10 기능 완전 이식)
+# 5. 텔레그램 통신 및 브리핑 로직
 # =========================
 def send_msg(msg):
     try:
@@ -122,7 +126,7 @@ def send_system_briefing():
     total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
     daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
     
-    msg = f"🤖 [쿠퍼춘봉 V12 브리핑]\n"
+    msg = f"🐶 [쿠퍼춘봉 V12 브리핑]\n"
     msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
     msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
     msg += f"💻 서버 상태: CPU {cpu}% / RAM {ram}%\n"
@@ -226,7 +230,7 @@ def buy_check(ticker):
         return False
 
 # =========================
-# 10. 분할 매도 로직 및 통계 연동
+# 10. 분할 매도 로직 및 통계 연동 (횡보 탈출 포함)
 # =========================
 def sell_logic(ticker, avg_price, current_price, balance):
     profit = (current_price - avg_price) / avg_price * 100
@@ -240,13 +244,35 @@ def sell_logic(ticker, avg_price, current_price, balance):
     max_p = bot["max_price"][ticker]
     drop = (max_p - current_price) / max_p * 100
 
+    # 💡 [NEW] 0. 횡보장 지루함 탈출 로직 (수익 1% 이상일 때 발동)
+    if profit >= STAGNANT_PROFIT:
+        try:
+            # 5분봉 3개 (최근 15분) 데이터로 조정됨
+            df5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=3)
+            if df5 is not None and len(df5) >= 3:
+                max_h = df5['high'].max()
+                min_l = df5['low'].min()
+                volatility = (max_h - min_l) / min_l * 100
+                
+                # 최고/최저가 변동폭이 0.7% 이하일 때 익절
+                if volatility <= STAGNANT_VOLATILITY:
+                    upbit.sell_market_order(ticker, balance)
+                    bot["positions"].pop(ticker, None)
+                    bot["max_price"].pop(ticker, None)
+                    
+                    profit_krw = (current_price - avg_price) * balance
+                    update_statistics(profit_krw, True)
+                    send_msg(f"🥱 횡보장 탈출 전량 익절 {ticker} (+{profit:.2f}%) / 수익: {profit_krw:,.0f}원")
+                    return
+        except Exception as e:
+            pass # API 에러 발생 시 부드럽게 넘기고 기존 로직 진행
+
     # 1. 절반 익절 (2.0% 도달 시)
     if profit >= 2.0 and not bot["positions"].get(ticker, {}).get("half_sold", True):
         sell_amount = balance * 0.5
         upbit.sell_market_order(ticker, sell_amount)
         bot["positions"][ticker]["half_sold"] = True
         
-        # 수익 기록
         profit_krw = (current_price - avg_price) * sell_amount
         update_statistics(profit_krw, True)
         send_msg(f"✅ 1차(절반) 익절 {ticker} (+{profit:.2f}%) / 수익: {profit_krw:,.0f}원")
@@ -258,7 +284,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
         bot["positions"].pop(ticker, None)
         bot["max_price"].pop(ticker, None)
         
-        # 수익 기록
         profit_krw = (current_price - avg_price) * balance
         update_statistics(profit_krw, True)
         send_msg(f"🚀 최종 트레일링 익절 {ticker} (+{profit:.2f}%) / 수익: {profit_krw:,.0f}원")
@@ -271,7 +296,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
         bot["max_price"].pop(ticker, None)
         bot["blacklist"][ticker] = time.time() + 3600 * BLACKLIST_HOURS
         
-        # 손실 기록
         profit_krw = (current_price - avg_price) * balance
         update_statistics(profit_krw, False)
         send_msg(f"😭 손절 {ticker} ({profit:.2f}%) / 손실: {profit_krw:,.0f}원")
@@ -330,7 +354,6 @@ def main():
                     avg = upbit.get_avg_buy_price(ticker)
 
                     if avg and price:
-                        # 방어 로직 (2차 물타기 확인)
                         if ticker in bot["positions"]:
                             pos = bot["positions"][ticker]
                             if pos["stage"] == 1:
@@ -344,7 +367,7 @@ def main():
                                         send_msg(f"🛡️ 2차 매수(물타기) {ticker}")
                                         continue 
 
-                        # 익절/손절 확인 (통계 업데이트 포함)
+                        # 익절/손절/횡보탈출 확인 (통계 업데이트 포함)
                         sell_logic(ticker, avg, price, balance)
 
                 time.sleep(0.1)
