@@ -45,8 +45,8 @@ performance = load_performance()
 def get_kst():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 
-MAX_POSITIONS = 8           # 💡 [업그레이드] 최대 보유 종목 5개 -> 8개로 확장
-TOP_N = 20                  # 💡 스크리닝 대상 종목 20개
+MAX_POSITIONS = 8           
+TOP_N = 20                  
 
 TRAILING_START = 3.0        
 TRAILING_DROP = 1.2         
@@ -73,7 +73,7 @@ bot = {
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "🚀 V14 AI 트레이딩 봇 (Top 20 확장판) 가동중"
+def home(): return "🚀 V14 AI 트레이딩 봇 (합격선 최적화) 가동중"
 
 def run_server(): app.run(host='0.0.0.0', port=10000)
 
@@ -224,7 +224,7 @@ def get_position_size(ticker, krw):
     return base
 
 # =========================
-# 7. 매도 로직 (독립 실행형)
+# 7. 매도 로직
 # =========================
 def sell_logic(ticker, avg_price, current_price, balance):
     profit = (current_price - avg_price) / avg_price * 100
@@ -233,7 +233,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
     if current_price > bot["max_price"][ticker]: bot["max_price"][ticker] = current_price
     max_p = bot["max_price"][ticker]; drop = (max_p - current_price) / max_p * 100
 
-    # 0. 횡보 탈출
     if profit >= STAGNANT_PROFIT:
         try:
             df5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=3)
@@ -248,7 +247,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
                     return
         except: pass
 
-    # 1. 절반 익절 (2.0%)
     if profit >= 2.0 and not bot["positions"].get(ticker, {}).get("half_sold", True):
         sell_amount = balance * 0.5
         upbit.sell_market_order(ticker, sell_amount)
@@ -258,7 +256,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
         send_msg(f"✅ 1차(절반) 익절 {ticker} (+{profit:.2f}%) / 수익: {krw_profit:,.0f}원")
         return
 
-    # 2. 최종 익절 (트레일링)
     if profit >= TRAILING_START and drop >= TRAILING_DROP:
         upbit.sell_market_order(ticker, balance)
         bot["positions"].pop(ticker, None); bot["max_price"].pop(ticker, None)
@@ -267,7 +264,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
         send_msg(f"🚀 최종 트레일링 익절 {ticker} (+{profit:.2f}%) / 수익: {krw_profit:,.0f}원")
         return
 
-    # 3. 손절
     if profit <= STOP_LOSS:
         upbit.sell_market_order(ticker, balance)
         bot["positions"].pop(ticker, None); bot["max_price"].pop(ticker, None)
@@ -280,7 +276,7 @@ def sell_logic(ticker, avg_price, current_price, balance):
 # 8. 메인 루프 
 # =========================
 def main():
-    send_msg(f"🚀 V14 AI 봇 (Top 20 확장판) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
+    send_msg(f"🚀 V14 AI 봇 (스코어 모순 해결) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
     
     try: send_system_briefing()
     except: pass
@@ -290,16 +286,13 @@ def main():
 
     while True:
         try:
-            # 1. 1시간 타이머 체크 
             now_ts = time.time()
             if now_ts - bot["last_report_time"] > REPORT_INTERVAL:
                 send_system_briefing()
                 bot["last_report_time"] = now_ts
 
-            # 2. 계좌 안전 조회
             my_balances = upbit.get_balances()
             if not isinstance(my_balances, list):
-                print(f"[{get_kst().strftime('%H:%M:%S')}] 업비트 API 응답 지연 중... 잠시 대기합니다.")
                 time.sleep(5)
                 continue
                 
@@ -314,14 +307,11 @@ def main():
                     if bal > 0 and avg > 0:
                         holding_dict[f"KRW-{b['currency']}"] = {'balance': bal, 'avg_buy_price': avg}
                         
-            # 심장박동(Heartbeat) 로그 
             loop_count += 1
             if loop_count % 10 == 0:
-                print(f"[{get_kst().strftime('%H:%M:%S')}] 봇 정상 스캔 중... (현재 보유: {len(holding_dict)}/{MAX_POSITIONS}종목, 탐색: 상위 {TOP_N}개)")
+                print(f"[{get_kst().strftime('%H:%M:%S')}] 봇 정상 스캔 중... (현재 보유: {len(holding_dict)}/{MAX_POSITIONS}종목)")
 
-            # ========================================================
-            # [파트 A] 보유 종목 집중 관리 (매도/물타기)
-            # ========================================================
+            # [파트 A] 보유 종목 관리
             holding_tickers = list(holding_dict.keys())
             if holding_tickers:
                 prices = pyupbit.get_current_price(holding_tickers)
@@ -333,13 +323,11 @@ def main():
                         
                         if not current_price: continue
                             
-                        # 수동 매수 종목도 강제 연동
                         if ticker not in bot["positions"]:
                             bot["positions"][ticker] = {"stage": 2, "half_sold": False, "buy_price": avg_price}
                             
                         pos = bot["positions"][ticker]
                         
-                        # 2차 물타기 로직
                         if pos["stage"] == 1:
                             drop = (current_price - pos["buy_price"]) / pos["buy_price"] * 100
                             if drop <= -1.0:
@@ -352,17 +340,13 @@ def main():
                                     time.sleep(0.2)
                                     continue 
                                     
-                        # 익절/손절/횡보탈출 실행
                         sell_logic(ticker, avg_price, current_price, balance)
 
-            # 보유 안 하는 종목 봇 기억에서 삭제
             tracked_tickers = list(bot["positions"].keys())
             for t in tracked_tickers:
                 if t not in holding_dict: del bot["positions"][t]
 
-            # ========================================================
-            # [파트 B] 신규 매수 탐색 (Top 20 스캔)
-            # ========================================================
+            # [파트 B] 신규 매수 탐색
             if len(holding_dict) < MAX_POSITIONS:
                 buy_tickers = get_top_coins()
                 target_tickers = [t for t in buy_tickers if t not in holding_dict and (t not in bot["blacklist"] or time.time() > bot["blacklist"][t])]
@@ -372,8 +356,9 @@ def main():
                     if prices:
                         for ticker in target_tickers:
                             if len(holding_dict) >= MAX_POSITIONS: break 
-                                
-                            if get_score(ticker) >= 7 and is_safe_volatility(ticker):
+                            
+                            # 💡 [핵심 수정] 합격선을 6점으로 조정하여, 초기 구동 시에도 매수가 가능하도록 수정 완료!
+                            if get_score(ticker) >= 6 and is_safe_volatility(ticker):
                                 total_target_amount = get_position_size(ticker, krw_balance)
                                 amount = total_target_amount * 0.5
                                 
@@ -393,7 +378,7 @@ def main():
             time.sleep(1) 
             
         except Exception as e:
-            print(f"[{get_kst().strftime('%H:%M:%S')}] 메인 루프 에러 복구 중: {e}")
+            print(f"[{get_kst().strftime('%H:%M:%S')}] 메인 루프 에러: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
