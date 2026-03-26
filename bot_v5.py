@@ -73,7 +73,7 @@ bot = {
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "🚀 V14 AI 트레이딩 봇 (텔레그램 리모컨 탑재) 가동중"
+def home(): return "🚀 V14.2 AI 트레이딩 봇 (티타늄 API 방어) 가동중"
 
 def run_server(): app.run(host='0.0.0.0', port=10000)
 
@@ -84,7 +84,6 @@ def send_msg(msg):
     except: pass
 
 def telegram_polling():
-    """텔레그램 명령어 수신 스레드 (수동 매도 기능 추가)"""
     last_update_id = None
     while True:
         try:
@@ -98,18 +97,14 @@ def telegram_polling():
                     last_update_id = item["update_id"] + 1
                     msg_text = str(item.get("message", {}).get("text", "")).strip().upper()
                     
-                    # 1. 상태 점검 명령어
                     if "/상태" in msg_text or "상태" == msg_text:
                         print(f"[{get_kst().strftime('%H:%M:%S')}] 텔레그램 '/상태' 명령어 수신!")
                         send_system_briefing()
                         
-                    # 2. 수동 매도 명령어 (예: "XRP 매도" 또는 "KRW-XRP 매도")
                     elif "매도" in msg_text:
                         ticker_raw = msg_text.replace("매도", "").strip()
                         if ticker_raw:
-                            # 사용자가 "KRW-"를 안 붙이고 "XRP"만 입력해도 자동으로 변환
                             ticker = ticker_raw if ticker_raw.startswith("KRW-") else f"KRW-{ticker_raw}"
-                            
                             balance = upbit.get_balance(ticker)
                             if balance is not None and balance > 0:
                                 try:
@@ -118,10 +113,9 @@ def telegram_polling():
                                     bot["max_price"].pop(ticker, None)
                                     send_msg(f"⚡ [수동 매도 완료] 주인이 직접 {ticker} 전량을 시장가로 매도했습니다!")
                                 except Exception as e:
-                                    send_msg(f"❌ [수동 매도 실패] {ticker} 매도 중 에러 발생: {e}")
+                                    send_msg(f"❌ [수동 매도 실패] {ticker} 매도 에러: {e}")
                             else:
                                 send_msg(f"⚠ [매도 실패] 보유 중인 {ticker} 코인이 없습니다.")
-                                
         except: pass
         time.sleep(2)
 
@@ -186,6 +180,7 @@ def ta_rsi(series, period=14):
 def is_safe_volatility(ticker):
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute60", count=2)
+        if df is None or len(df) < 2: return False 
         vol = (df['high'].iloc[-1] - df['low'].iloc[-1]) / df['low'].iloc[-1] * 100
         return vol < 6.0
     except: return False
@@ -199,7 +194,8 @@ def get_top_coins():
             batch = tickers[i:i+50]
             res = requests.get(url, headers={"accept": "application/json"}, params={"markets": ",".join(batch)})
             if res.status_code == 200: all_data.extend(res.json())
-            time.sleep(0.1) 
+            # 🛡️ 1차 방어: 목록 호출 시 0.2초 여유
+            time.sleep(0.2) 
         
         scored_data = []
         for item in all_data:
@@ -219,13 +215,15 @@ def get_score(ticker):
     score = 0
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute15", count=50)
+        if df is None or len(df) < 20: return 0 
+        
         df['ma5'] = df['close'].rolling(5).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         r = ta_rsi(df['close']).iloc[-1]
 
         if df['close'].iloc[-1] > df['ma5'].iloc[-1] > df['ma20'].iloc[-1]: score += 2
         if 40 < r < 65: score += 2
-        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.5: score += 2
+        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.3: score += 2
 
         if ticker in performance:
             t = performance[ticker]["trades"]; w = performance[ticker]["wins"]
@@ -299,7 +297,7 @@ def sell_logic(ticker, avg_price, current_price, balance):
 # 8. 메인 루프 
 # =========================
 def main():
-    send_msg(f"🚀 V14 AI 봇 (수동 조종 가능) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
+    send_msg(f"🚀 V14.2 AI 봇 (티타늄 API 방어) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
     
     try: send_system_briefing()
     except: pass
@@ -334,7 +332,9 @@ def main():
             if loop_count % 10 == 0:
                 print(f"[{get_kst().strftime('%H:%M:%S')}] 봇 정상 스캔 중... (현재 보유: {len(holding_dict)}/{MAX_POSITIONS}종목)")
 
-            # [파트 A] 보유 종목 관리
+            # ========================================================
+            # [파트 A] 보유 종목 관리 (매도/물타기)
+            # ========================================================
             holding_tickers = list(holding_dict.keys())
             if holding_tickers:
                 prices = pyupbit.get_current_price(holding_tickers)
@@ -360,16 +360,20 @@ def main():
                                     pos["stage"] = 2
                                     krw_balance -= amount 
                                     send_msg(f"🛡️ 2차 매수(물타기) {ticker}")
-                                    time.sleep(0.2)
+                                    time.sleep(0.3)
                                     continue 
                                     
                         sell_logic(ticker, avg_price, current_price, balance)
+                        # 🛡️ 2차 방어: 보유 종목 매도 검사마다 0.3초 휴식
+                        time.sleep(0.3) 
 
             tracked_tickers = list(bot["positions"].keys())
             for t in tracked_tickers:
                 if t not in holding_dict: del bot["positions"][t]
 
+            # ========================================================
             # [파트 B] 신규 매수 탐색
+            # ========================================================
             if len(holding_dict) < MAX_POSITIONS:
                 buy_tickers = get_top_coins()
                 target_tickers = [t for t in buy_tickers if t not in holding_dict and (t not in bot["blacklist"] or time.time() > bot["blacklist"][t])]
@@ -395,7 +399,9 @@ def main():
                                     send_msg(f"🔥 AI 1차 매수 {ticker} (스코어 달성)")
                                     krw_balance -= amount
                                     holding_dict[ticker] = True 
-                                    time.sleep(0.2)
+                            
+                            # 🛡️ 3차 방어: 매수 탐색 루프마다 무조건 0.5초 휴식! (API 차단 완벽 봉쇄)
+                            time.sleep(0.5)
 
             time.sleep(1) 
             
