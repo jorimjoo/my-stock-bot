@@ -73,7 +73,7 @@ bot = {
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "🚀 V14 AI 트레이딩 봇 (합격선 최적화) 가동중"
+def home(): return "🚀 V14 AI 트레이딩 봇 (텔레그램 리모컨 탑재) 가동중"
 
 def run_server(): app.run(host='0.0.0.0', port=10000)
 
@@ -84,6 +84,7 @@ def send_msg(msg):
     except: pass
 
 def telegram_polling():
+    """텔레그램 명령어 수신 스레드 (수동 매도 기능 추가)"""
     last_update_id = None
     while True:
         try:
@@ -95,10 +96,32 @@ def telegram_polling():
             if res.status_code == 200:
                 for item in res.json().get("result", []):
                     last_update_id = item["update_id"] + 1
-                    msg_text = str(item.get("message", {}).get("text", "")).strip()
-                    if "/상태" in msg_text:
+                    msg_text = str(item.get("message", {}).get("text", "")).strip().upper()
+                    
+                    # 1. 상태 점검 명령어
+                    if "/상태" in msg_text or "상태" == msg_text:
                         print(f"[{get_kst().strftime('%H:%M:%S')}] 텔레그램 '/상태' 명령어 수신!")
                         send_system_briefing()
+                        
+                    # 2. 수동 매도 명령어 (예: "XRP 매도" 또는 "KRW-XRP 매도")
+                    elif "매도" in msg_text:
+                        ticker_raw = msg_text.replace("매도", "").strip()
+                        if ticker_raw:
+                            # 사용자가 "KRW-"를 안 붙이고 "XRP"만 입력해도 자동으로 변환
+                            ticker = ticker_raw if ticker_raw.startswith("KRW-") else f"KRW-{ticker_raw}"
+                            
+                            balance = upbit.get_balance(ticker)
+                            if balance is not None and balance > 0:
+                                try:
+                                    upbit.sell_market_order(ticker, balance)
+                                    bot["positions"].pop(ticker, None)
+                                    bot["max_price"].pop(ticker, None)
+                                    send_msg(f"⚡ [수동 매도 완료] 주인이 직접 {ticker} 전량을 시장가로 매도했습니다!")
+                                except Exception as e:
+                                    send_msg(f"❌ [수동 매도 실패] {ticker} 매도 중 에러 발생: {e}")
+                            else:
+                                send_msg(f"⚠ [매도 실패] 보유 중인 {ticker} 코인이 없습니다.")
+                                
         except: pass
         time.sleep(2)
 
@@ -276,7 +299,7 @@ def sell_logic(ticker, avg_price, current_price, balance):
 # 8. 메인 루프 
 # =========================
 def main():
-    send_msg(f"🚀 V14 AI 봇 (스코어 모순 해결) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
+    send_msg(f"🚀 V14 AI 봇 (수동 조종 가능) 가동 시작 ({get_kst().strftime('%m/%d %H:%M')})")
     
     try: send_system_briefing()
     except: pass
@@ -357,7 +380,6 @@ def main():
                         for ticker in target_tickers:
                             if len(holding_dict) >= MAX_POSITIONS: break 
                             
-                            # 💡 [핵심 수정] 합격선을 6점으로 조정하여, 초기 구동 시에도 매수가 가능하도록 수정 완료!
                             if get_score(ticker) >= 6 and is_safe_volatility(ticker):
                                 total_target_amount = get_position_size(ticker, krw_balance)
                                 amount = total_target_amount * 0.5
