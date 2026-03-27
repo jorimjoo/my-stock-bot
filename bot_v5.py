@@ -6,7 +6,7 @@ import pyupbit
 import json
 import os
 from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer # Flask 대신 파이썬 내장 서버 사용
+from http.server import BaseHTTPRequestHandler, HTTPServer 
 
 # =========================
 # 1. API 설정
@@ -68,7 +68,7 @@ bot = {
 }
 
 # =========================
-# 4. 🌐 내장 웹 서버 (클라우드 기절 방지용 - 패키지 에러 0%)
+# 4. 🌐 내장 웹 서버
 # =========================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -151,7 +151,7 @@ def send_system_briefing():
         total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
         daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
         
-        msg = f"🐶 [쿠퍼춘봉 V16 안정화 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V16.1 입질 강화 브리핑]\n"
         msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 보유 KRW: {krw_balance:,.0f}원\n\n"
@@ -178,7 +178,7 @@ def update_performance(ticker, profit):
     save_performance(performance)
 
 # =========================
-# 6. 핵심 지표 계산 (Pandas 호환성 강화)
+# 6. 핵심 지표 계산 
 # =========================
 def ta_rsi(series, period=14):
     delta = series.diff()
@@ -222,7 +222,7 @@ def get_top_coins():
         return []
 
 # =========================
-# 7. 🧠 AI 타점 스코어링 및 비중 결정 
+# 7. 🧠 AI 타점 스코어링 및 비중 결정 (입질 기준 대폭 인하)
 # =========================
 def get_score(ticker):
     score = 0
@@ -234,15 +234,19 @@ def get_score(ticker):
         df['ma20'] = df['close'].rolling(20).mean()
         r = ta_rsi(df['close']).iloc[-1]
 
+        # 1. 추세 점수
         if df['close'].iloc[-1] > df['ma20'].iloc[-1]: score += 1
         if df['close'].iloc[-1] > df['ma5'].iloc[-1]: score += 1
         if df['ma20'].iloc[-1] > df['ma20'].iloc[-3]: score += 1 
 
-        if r < 35: score += 2        
-        elif 40 <= r <= 65: score += 1 
+        # 💡 2. RSI 점수 (바닥 줍기 기준 대폭 완화)
+        if r <= 40: score += 2        # 35 -> 40 이하로 기준 완화 (입질 팍팍)
+        elif 40 < r <= 65: score += 1 
 
-        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.1: score += 1 
+        # 💡 3. 거래량 점수 (아주 미세한 상승도 허용)
+        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.05: score += 1 # 10% -> 5%만 증가해도 가산점
 
+        # 4. 과거 승률
         if ticker in performance:
             t = performance[ticker]["trades"]; w = performance[ticker]["wins"]
             if t >= 3:
@@ -251,7 +255,7 @@ def get_score(ticker):
                 elif winrate < 0.3: score -= 1
                 
     except Exception as e: 
-        print(f"스코어 계산 에러({ticker}): {e}")
+        pass
     return score
 
 def get_position_size(ticker, krw):
@@ -346,8 +350,8 @@ def main():
     print(f"[{get_kst().strftime('%H:%M:%S')}] 🚀 시스템 초기화 시작...")
     synced_count = sync_existing_positions()
     
-    start_msg = f"🚀 V16 불사조 안정판 시작 ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 기존 보유 종목 {synced_count}개 연동 완료!"
+    start_msg = f"🚀 V16.1 입질 강화판 시작 ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 기존 보유 종목 {synced_count}개 연동 / 매수 합격선 3점 하향!"
     send_msg(start_msg)
     
     send_system_briefing()
@@ -365,7 +369,6 @@ def main():
 
             my_balances = upbit.get_balances()              
             if not isinstance(my_balances, list):
-                print(f"[{get_kst().strftime('%H:%M:%S')}] 업비트 잔고 조회 실패, 재시도 대기중...")
                 time.sleep(5)
                 continue
                 
@@ -451,8 +454,8 @@ def main():
                     if loop_count % 10 == 0 and score > 0:
                         print(f" - {ticker.replace('KRW-', '')} : {score}점")
                     
-                    # 💡 합격선 4점 (동일하게 유지)
-                    if score >= 4 and is_safe_volatility(ticker):
+                    # 💡 합격선 3점 (입질 대폭 강화)
+                    if score >= 3 and is_safe_volatility(ticker):
                         current_price = all_prices.get(ticker)
                         if not current_price: continue
 
