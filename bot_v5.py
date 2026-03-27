@@ -5,6 +5,7 @@ import pandas as pd
 import pyupbit
 import json
 import os
+import gc # 💡 메모리 청소기 추가
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer 
 
@@ -80,7 +81,6 @@ class SimpleHandler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    print(f"[{get_kst().strftime('%H:%M:%S')}] 웹 서버 시작됨 (Port: {port})")
     server.serve_forever()
 
 # =========================
@@ -90,12 +90,10 @@ def send_msg(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.get(url, params={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
-    except Exception as e:
-        print(f"텔레그램 발송 실패: {e}")
+    except: pass
 
 def telegram_polling():
     last_update_id = None
-    print(f"[{get_kst().strftime('%H:%M:%S')}] 텔레그램 감시 스레드 가동!")
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
@@ -110,7 +108,6 @@ def telegram_polling():
                     msg_text = str(item.get("message", {}).get("text", "")).strip().upper()
                     
                     if "/상태" in msg_text or "상태" == msg_text:
-                        print(f"[{get_kst().strftime('%H:%M:%S')}] 수동 상태점검 수신!")
                         send_system_briefing()
                         
                     elif "매도" in msg_text:
@@ -151,7 +148,7 @@ def send_system_briefing():
         total_win_rate = (t_stats["wins"] / t_stats["trades"] * 100) if t_stats["trades"] > 0 else 0
         daily_win_rate = (d_stats["wins"] / d_stats["trades"] * 100) if d_stats["trades"] > 0 else 0
         
-        msg = f"🐶 [쿠퍼춘봉 V16.1 입질 강화 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V16.2 다이어트 브리핑]\n"
         msg += f"⌚ 봇 가동: {t_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동 시간: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 보유 KRW: {krw_balance:,.0f}원\n\n"
@@ -159,9 +156,7 @@ def send_system_briefing():
         msg += f"📅 [오늘 하루 통계]\n- 수익: {d_stats['profit']:,.0f}원\n- 거래: {d_stats['trades']}회 (승률 {daily_win_rate:.1f}%)"
         
         send_msg(msg)
-        print(f"[{get_kst().strftime('%H:%M:%S')}] 시스템 브리핑 전송 완료.")
-    except Exception as e:
-        print(f"[{get_kst().strftime('%H:%M:%S')}] 브리핑 전송 중 에러: {e}")
+    except: pass
 
 def update_statistics(profit_krw, is_win):
     check_daily_reset()
@@ -217,12 +212,10 @@ def get_top_coins():
             scored_data.append((item['market'], score))
         scored_data.sort(key=lambda x: x[1], reverse=True)
         return [x[0] for x in scored_data[:TOP_N]]
-    except Exception as e:
-        print(f"종목 검색 에러: {e}")
-        return []
+    except: return []
 
 # =========================
-# 7. 🧠 AI 타점 스코어링 및 비중 결정 (입질 기준 대폭 인하)
+# 7. 🧠 AI 타점 스코어링
 # =========================
 def get_score(ticker):
     score = 0
@@ -234,28 +227,22 @@ def get_score(ticker):
         df['ma20'] = df['close'].rolling(20).mean()
         r = ta_rsi(df['close']).iloc[-1]
 
-        # 1. 추세 점수
         if df['close'].iloc[-1] > df['ma20'].iloc[-1]: score += 1
         if df['close'].iloc[-1] > df['ma5'].iloc[-1]: score += 1
         if df['ma20'].iloc[-1] > df['ma20'].iloc[-3]: score += 1 
 
-        # 💡 2. RSI 점수 (바닥 줍기 기준 대폭 완화)
-        if r <= 40: score += 2        # 35 -> 40 이하로 기준 완화 (입질 팍팍)
+        if r <= 40: score += 2        
         elif 40 < r <= 65: score += 1 
 
-        # 💡 3. 거래량 점수 (아주 미세한 상승도 허용)
-        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.05: score += 1 # 10% -> 5%만 증가해도 가산점
+        if df['volume'].iloc[-2] > df['volume'].iloc[-3] * 1.05: score += 1 
 
-        # 4. 과거 승률
         if ticker in performance:
             t = performance[ticker]["trades"]; w = performance[ticker]["wins"]
             if t >= 3:
                 winrate = w / t
                 if winrate > 0.5: score += 1
                 elif winrate < 0.3: score -= 1
-                
-    except Exception as e: 
-        pass
+    except: pass
     return score
 
 def get_position_size(ticker, krw):
@@ -317,9 +304,6 @@ def sell_logic(ticker, avg_price, current_price, balance):
         update_performance(ticker, profit); update_statistics(krw_profit, False)
         send_msg(f"😭 손절 {ticker} ({profit:.2f}%) / 손실: {krw_profit:,.0f}원")
 
-# =========================
-# 9. 기존 보유 잔고 동기화
-# =========================
 def sync_existing_positions():
     try:
         my_balances = upbit.get_balances()
@@ -327,38 +311,30 @@ def sync_existing_positions():
         if isinstance(my_balances, list):
             for b in my_balances:
                 if b['currency'] == 'KRW': continue
-                balance = float(b['balance'])
-                avg_buy_price = float(b['avg_buy_price'])
-                
+                balance = float(b['balance']); avg_buy_price = float(b['avg_buy_price'])
                 if balance > 0 and avg_buy_price > 0:
-                    ticker = f"KRW-{b['currency']}"
-                    bot["positions"][ticker] = {
-                        "stage": 2, 
-                        "half_sold": False,
-                        "buy_price": avg_buy_price
-                    }
+                    bot["positions"][f"KRW-{b['currency']}"] = {"stage": 2, "half_sold": False, "buy_price": avg_buy_price}
                     count += 1
         return count
-    except Exception as e:
-        print(f"잔고 동기화 에러: {e}")
-        return 0
+    except: return 0
 
 # =========================
-# 10. 메인 루프 
+# 9. 메인 루프 
 # =========================
 def main():
     print(f"[{get_kst().strftime('%H:%M:%S')}] 🚀 시스템 초기화 시작...")
     synced_count = sync_existing_positions()
     
-    start_msg = f"🚀 V16.1 입질 강화판 시작 ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 기존 보유 종목 {synced_count}개 연동 / 매수 합격선 3점 하향!"
+    start_msg = f"🚀 V16.2 다이어트 성공판 시작 ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 기존 보유 종목 {synced_count}개 연동 / 램 최적화 적용!"
     send_msg(start_msg)
     
     send_system_briefing()
     bot["last_report_time"] = time.time()
     
     loop_count = 0
-    print(f"[{get_kst().strftime('%H:%M:%S')}] 🤖 메인 루프 진입 성공!")
+    last_top_coins_time = 0
+    buy_tickers = []
 
     while True:
         try:
@@ -367,42 +343,39 @@ def main():
                 send_system_briefing()
                 bot["last_report_time"] = now_ts
 
+            # 💡 1. 업비트 에러 직통 알림 (IP 미등록 문제 등)
             my_balances = upbit.get_balances()              
             if not isinstance(my_balances, list):
-                time.sleep(5)
+                print(f"[{get_kst().strftime('%H:%M:%S')}] 🚨 업비트 잔고 조회 에러: {my_balances}")
+                send_msg(f"🚨 [긴급] 업비트 잔고 조회 실패! API 키나 클라우드 IP 권한을 확인해주세요.\n사유: {my_balances}")
+                time.sleep(30)
                 continue
                 
             balance_dict = {}
             krw_balance = 0.0
             for b in my_balances:
-                if b['currency'] == 'KRW':
-                    krw_balance = float(b['balance'])
+                if b['currency'] == 'KRW': krw_balance = float(b['balance'])
                 else:
-                    balance_dict[f"KRW-{b['currency']}"] = {
-                        "balance": float(b['balance']),
-                        "avg_buy_price": float(b['avg_buy_price'])
-                    }
+                    balance_dict[f"KRW-{b['currency']}"] = {"balance": float(b['balance']), "avg_buy_price": float(b['avg_buy_price'])}
 
             holding_tickers = list(balance_dict.keys())
-            buy_tickers = get_top_coins()
+            
+            # 💡 2. 스마트 캐싱: 15분마다 1번씩만 Top 20 코인 스캔 (서버 부하 90% 감소)
+            if now_ts - last_top_coins_time > 900:
+                buy_tickers = get_top_coins()
+                last_top_coins_time = now_ts
+                print(f"[{get_kst().strftime('%H:%M:%S')}] 🔄 Top 20 타겟 코인 갱신 완료")
             
             all_target_tickers = list(set(holding_tickers + buy_tickers))
             all_prices = {}
             if all_target_tickers:
                 res_prices = pyupbit.get_current_price(all_target_tickers)
-                if isinstance(res_prices, float) or isinstance(res_prices, int):
-                    all_prices = {all_target_tickers[0]: float(res_prices)}
-                elif isinstance(res_prices, dict):
-                    all_prices = res_prices
+                if isinstance(res_prices, float) or isinstance(res_prices, int): all_prices = {all_target_tickers[0]: float(res_prices)}
+                elif isinstance(res_prices, dict): all_prices = res_prices
 
             loop_count += 1
             if loop_count % 10 == 0:
-                holding_info = []
-                for t in holding_tickers:
-                    if t in all_prices and balance_dict[t]['avg_buy_price'] > 0:
-                        p_rate = (all_prices[t] - balance_dict[t]['avg_buy_price']) / balance_dict[t]['avg_buy_price'] * 100
-                        holding_info.append(f"{t.replace('KRW-', '')} {p_rate:+.1f}%")
-                
+                holding_info = [f"{t.replace('KRW-', '')} {((all_prices[t] - balance_dict[t]['avg_buy_price']) / balance_dict[t]['avg_buy_price'] * 100):+.1f}%" for t in holding_tickers if t in all_prices and balance_dict[t]['avg_buy_price'] > 0]
                 info_str = ", ".join(holding_info) if holding_info else "없음"
                 print(f"\n[{get_kst().strftime('%H:%M:%S')}] 🤖 감시중 (보유: {len(holding_tickers)}/{MAX_POSITIONS} | {info_str}) / 현금: {krw_balance:,.0f}원")
 
@@ -444,17 +417,14 @@ def main():
             if len(balance_dict) < MAX_POSITIONS:
                 target_tickers = [t for t in buy_tickers if t not in balance_dict and (t not in bot["blacklist"] or time.time() > bot["blacklist"][t])]
                 
-                if loop_count % 10 == 0: print("--- 🔍 신규 먹잇감 AI 스코어 스캔 중 ---")
+                if loop_count % 10 == 0: print("--- 🔍 신규 먹잇감 스캔 중 ---")
                 
                 for ticker in target_tickers:
                     if len(balance_dict) >= MAX_POSITIONS: break 
                     
                     score = get_score(ticker)
+                    if loop_count % 10 == 0 and score > 0: print(f" - {ticker.replace('KRW-', '')} : {score}점")
                     
-                    if loop_count % 10 == 0 and score > 0:
-                        print(f" - {ticker.replace('KRW-', '')} : {score}점")
-                    
-                    # 💡 합격선 3점 (입질 대폭 강화)
                     if score >= 3 and is_safe_volatility(ticker):
                         current_price = all_prices.get(ticker)
                         if not current_price: continue
@@ -465,20 +435,16 @@ def main():
                         if krw_balance >= amount:
                             try:
                                 upbit.buy_market_order(ticker, amount)
-                                bot["positions"][ticker] = {
-                                    "stage": 1, 
-                                    "half_sold": False, 
-                                    "buy_price": current_price, 
-                                    "target_amt": total_target_amount
-                                }
+                                bot["positions"][ticker] = {"stage": 1, "half_sold": False, "buy_price": current_price, "target_amt": total_target_amount}
                                 send_msg(f"🔥 AI 1차 매수 {ticker} ({score}점 합격!)")
                                 krw_balance -= amount
                                 balance_dict[ticker] = True 
-                            except Exception as e:
-                                print(f"매수 에러 ({ticker}): {e}")
+                            except Exception as e: print(f"매수 에러 ({ticker}): {e}")
                     
                     time.sleep(0.3) 
 
+            # 💡 3. 메모리(RAM) 누수 강제 청소 (가장 중요)
+            gc.collect()
             time.sleep(1)
             
         except Exception as e:
