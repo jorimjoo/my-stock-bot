@@ -31,7 +31,7 @@ BLACKLIST_HOLD = 1800
 
 MIN_ORDER = 6000        
 REPORT_INTERVAL = 3600  
-FEE_RATE = 1.0005       # 💡 수수료 0.05% 반영
+FEE_RATE = 1.0005       
 
 blacklist = {}
 entry_price = {}
@@ -81,7 +81,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V7 전문가 최적화 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V7.1 불장 탑승 에디션 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n\n"
@@ -164,7 +164,7 @@ def get_top_coins():
         return []
 
 # =========================
-# 매수 조건 (💡 API 방어 & 로깅 강화)
+# 매수 조건 (🔥 불장 맞춤형 대폭 완화)
 # =========================
 def check_buy_signal(ticker):
     try:
@@ -177,17 +177,22 @@ def check_buy_signal(ticker):
         ma20 = get_ma(df, 20)
         rsi = ta_rsi(df['close']).iloc[-1]
 
-        cond1 = current_price > ma5 > ma20
+        # 1. 💡 상승 추세 (가격이 5일선, 20일선 위에만 있으면 OK)
+        cond1 = current_price > ma5 and current_price > ma20
+        
+        # 2. 양봉 유지 (현재 캔들 기준)
         cond2 = df['close'].iloc[-1] > df['open'].iloc[-1]
         
+        # 3. 💡 거래량 조건 완화 (이전 봉 대비 10% 상승만 해도 수급 인정)
         vol1 = df['volume'].iloc[-2]
         vol2 = df['volume'].iloc[-3]
-        cond3 = vol1 > (vol2 * 1.5)
-        cond4 = rsi < 70
+        cond3 = vol1 > (vol2 * 1.1)
+        
+        # 4. 💡 RSI 과열 기준 완화 (70 미만 -> 80 미만으로 올려서 불장 탑승)
+        cond4 = rsi < 80
 
         return cond1 and cond2 and cond3 and cond4
     except Exception as e:
-        # 💡 침묵의 에러 방지용 로그 출력
         print(f"[{ticker}] 매수 조건 체크 중 에러 발생: {e}")
         return False
 
@@ -225,7 +230,7 @@ def buy_coin(ticker, krw):
             return
             
         peak_price[ticker] = pyupbit.get_current_price(ticker)
-        send_msg(f"🔥 [신규 매수] {ticker} 완료! (조건 충족)")
+        send_msg(f"🔥 [신규 매수] {ticker} 완료! (불장 탑승)")
     except Exception as e:
         send_msg(f"❌ [매수 에러] {ticker}: {e}")
 
@@ -252,11 +257,11 @@ def sell_coin(ticker, reason, current_price, buy_price, balance_amt):
         send_msg(f"🚨 [시스템 에러] {ticker} 매도 중 에러 발생: {e}")
 
 # =========================
-# 메인 루프 (💡 API 최적화 적용)
+# 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 V7 전문가 최적화 에디션 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 수수료 계산, API 429 방어, 에러 로깅 완벽 탑재!"
+    start_msg = f"🚀 V7.1 불장 탑승 에디션 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ RSI 제한 80으로 완화, 수급 조건 대폭 완화!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -281,7 +286,6 @@ def main():
                 top_coins = get_top_coins()
                 last_top_coins_time = now
 
-            # 💡 [핵심] API 호출 최소화를 위해 보유 코인 현재가를 한 번에(Batch) 가져옴
             holding_tickers = [k for k in balances.keys() if k != "KRW"]
             current_prices = {}
             if holding_tickers:
@@ -340,17 +344,14 @@ def main():
                 if check_buy_signal(ticker):
                     buy_amount = max(krw * 0.2, MIN_ORDER)
                     
-                    # 💡 수수료(0.05%)를 포함한 필요 금액이 현재 잔고보다 작을 때만 매수!
                     if krw >= (buy_amount * FEE_RATE) and buy_amount >= MIN_ORDER:
                         buy_coin(ticker, buy_amount)
                         krw -= (buy_amount * FEE_RATE)
                         holding_count += 1
                         time.sleep(0.5)
 
-                # 💡 API 과부하 429 에러 방지를 위한 필수 휴식 시간
                 time.sleep(0.2) 
 
-            # 메인 루프 딜레이 약간 늘림 (서버 및 API 안정성)
             time.sleep(3)
 
         except Exception as e:
