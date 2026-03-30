@@ -20,9 +20,9 @@ upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 # 2. 직관적 매매 설정값
 # =========================
 TOP_N = 15
-MAX_POSITIONS = 10
+MAX_POSITIONS = 15      # 💡 여유롭게 15개로 확장 (5,000원 미만 코인은 개수에 안 샘)
 
-# 매도 원칙
+# 매도 원칙 (손실은 짧게, 수익은 길게)
 TAKE_PROFIT = 0.05      # +5% 잭팟 익절
 STOP_LOSS = -0.02       # -2% 칼손절 (절대 원칙)
 TRAILING_START = 0.015  # +1.5% 이상 수익 시
@@ -33,7 +33,7 @@ STAGNANT_SEC = 3600     # 1시간(3600초) 횡보 시 컷
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
-REPORT_INTERVAL = 3600  
+REPORT_INTERVAL = 3600  # 1시간 정기 브리핑
 
 blacklist = {}
 positions = {} 
@@ -56,7 +56,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V8 직관모드 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V8.2 먼지청소판 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -64,7 +64,7 @@ def run_server():
     server.serve_forever()
 
 # =========================
-# 4. 텔레그램 리모컨
+# 4. 텔레그램 리모컨 & 브리핑
 # =========================
 def send_msg(msg):
     try:
@@ -82,10 +82,11 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V8 직관 매매 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V8.2 필터링 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
-        msg += f"💰 KRW: {krw_balance:,.0f}원\n\n"
+        msg += f"💰 KRW: {krw_balance:,.0f}원\n"
+        msg += f"🎯 관리 중인 유효 종목: {len(positions)}/{MAX_POSITIONS}개\n\n"
         msg += f"📈 [전체 누적 통계]\n- 수익: {bot_stats['profit_krw']:,.0f}원\n- 거래: {bot_stats['trades']}회 (승률 {win_rate:.1f}%)"
         
         send_msg(msg)
@@ -108,6 +109,17 @@ def telegram_polling():
                     if "/상태" in msg_text or "상태" == msg_text:
                         send_system_briefing()
 
+                    elif "/매수테스트" in msg_text:
+                        send_msg("🔥 강제 매수 테스트! 비트코인 6,000원어치 매수를 시도합니다!")
+                        try:
+                            if upbit.get_balance("KRW") > 6000:
+                                upbit.buy_market_order("KRW-BTC", 6000)
+                                send_msg("✅ [성공] 6,000원어치 매수 체결 완료!")
+                            else:
+                                send_msg("❌ 현금이 부족합니다.")
+                        except Exception as e:
+                            send_msg(f"❌ 매수 실패: {e}")
+
                     elif "매도" in msg_text:
                         ticker_raw = msg_text.replace("매도", "").replace("/", "").strip()
                         if ticker_raw:
@@ -126,7 +138,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 종목 스캔 & 매수 신호 (1분봉+5분봉 크로스)
+# 5. 종목 스캔 & 매수 신호 
 # =========================
 def get_top_coins():
     try:
@@ -150,13 +162,11 @@ def get_top_coins():
 
 def check_buy_signal(ticker):
     """
-    반환값:
     "STRONG" : 1분봉, 5분봉 모두 폭발적 상승 (비중 크게)
     "NORMAL" : 5분봉 기준 상승 시작 (비중 기본)
     "NONE"   : 매수 금지
     """
     try:
-        # 1. 5분봉 체크
         df5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=25)
         if df5 is None or len(df5) < 20: return "NONE"
 
@@ -165,16 +175,13 @@ def check_buy_signal(ticker):
         ma5_5 = df5['close'].rolling(5).mean().iloc[-1]
         ma20_5 = df5['close'].rolling(20).mean().iloc[-1]
         
-        # 거래량이 이전 캔들 대비 1.5배 이상 폭증 (겁 없이 들어가는 시점)
         vol_current = df5['volume'].iloc[-2]
         vol_prev = df5['volume'].iloc[-3]
         vol_spike = vol_current > (vol_prev * 1.5)
 
-        # 5분봉 상승 조건: 5일선 > 20일선 위에 있고 양봉이며 거래량 터짐
         if not (c5 > o5 and c5 > ma5_5 > ma20_5 and vol_spike):
             return "NONE"
 
-        # 2. 1분봉 크로스 체크 (더 강한 확신을 위해)
         df1 = pyupbit.get_ohlcv(ticker, interval="minute1", count=25)
         if df1 is not None and len(df1) >= 20:
             c1 = df1['close'].iloc[-1]
@@ -182,7 +189,6 @@ def check_buy_signal(ticker):
             ma5_1 = df1['close'].rolling(5).mean().iloc[-1]
             ma20_1 = df1['close'].rolling(20).mean().iloc[-1]
             
-            # 1분봉도 상승 추세라면 "STRONG"
             if c1 > o1 and c1 > ma5_1 > ma20_1:
                 return "STRONG"
                 
@@ -190,26 +196,26 @@ def check_buy_signal(ticker):
     except: return "NONE"
 
 def is_obvious_loser(ticker, current_price):
-    """누가 봐도 꺾여서 떨어지는 종목 판별기"""
     try:
         df5 = pyupbit.get_ohlcv(ticker, interval="minute5", count=25)
         if df5 is None: return False
         
         ma20_5 = df5['close'].rolling(20).mean().iloc[-1]
-        # 현재가가 5분봉 20일 생명선을 강하게 하향 돌파하면 추세 꺾임
         if current_price < ma20_5:
             return True
         return False
     except: return False
 
 # =========================
-# 장부 관리 및 실행
+# 6. 장부 관리 및 실행 (💡 5,000원 필터링 완벽 적용)
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
     if not isinstance(balances, list): return 0
     
     krw_bal = 0.0
+    active_tickers = []
+    
     for b in balances:
         if b['currency'] == 'KRW': 
             krw_bal = float(b['balance'])
@@ -219,7 +225,11 @@ def sync_balances():
         avg_price = float(b['avg_buy_price'])
         amt = float(b['balance'])
         
-        if amt * avg_price >= 5000:
+        # 💡 [핵심] 매수원금이 5,000원 미만인 코인(자투리, 에어드랍, 거래불가)은 투명인간 취급!
+        buy_amount = amt * avg_price
+        
+        if buy_amount >= 5000:
+            active_tickers.append(ticker)
             if ticker not in positions:
                 positions[ticker] = {
                     'buy_price': avg_price,
@@ -227,9 +237,9 @@ def sync_balances():
                     'buy_time': time.time()
                 }
                 
-    current_holding_tickers = [f"KRW-{b['currency']}" for b in balances if b['currency'] != 'KRW' and float(b['balance']) * float(b['avg_buy_price']) >= 5000]
+    # 장부에는 있는데 현재 5000원 이상 유효 잔고에 없으면 장부에서 깔끔하게 삭제
     for t in list(positions.keys()):
-        if t not in current_holding_tickers:
+        if t not in active_tickers:
             positions.pop(t, None)
             
     return krw_bal
@@ -237,7 +247,9 @@ def sync_balances():
 def buy_coin(ticker, krw, signal_type):
     try:
         res = upbit.buy_market_order(ticker, krw)
-        if res is None or 'error' in res: return
+        if res is None or 'error' in res: 
+            send_msg(f"❌ [매수 에러] {ticker} 주문 거절: {res}")
+            return
             
         current_price = pyupbit.get_current_price(ticker)
         positions[ticker] = {
@@ -247,9 +259,9 @@ def buy_coin(ticker, krw, signal_type):
         }
         
         prefix = "🔥🔥 [강력 매수]" if signal_type == "STRONG" else "🔥 [일반 매수]"
-        send_msg(f"{prefix} {ticker} 진입! (거래량 급증 및 정배열)")
+        send_msg(f"{prefix} {ticker} 진입! (거래량 급증 및 정배열 돌파)")
     except Exception as e:
-        print(f"매수 에러: {e}")
+        send_msg(f"❌ [시스템 에러] 매수 실패: {e}")
 
 def sell_coin(ticker, reason, current_price, buy_price):
     try:
@@ -258,7 +270,9 @@ def sell_coin(ticker, reason, current_price, buy_price):
         krw_profit = (current_price - buy_price) * actual_balance
         
         res = upbit.sell_market_order(ticker, actual_balance)
-        if res is None or 'error' in res: return
+        if res is None or 'error' in res: 
+            send_msg(f"🚨 [매도 실패] {ticker} 주문 거절: {res}")
+            return
 
         positions.pop(ticker, None)
         
@@ -268,14 +282,14 @@ def sell_coin(ticker, reason, current_price, buy_price):
         
         send_msg(f"{reason} {ticker} ({profit_rate:+.2f}%) / 손익: {krw_profit:,.0f}원")
     except Exception as e:
-        print(f"매도 에러: {e}")
+        send_msg(f"🚨 [시스템 에러] 매도 실패: {e}")
 
 # =========================
-# 메인 루프
+# 7. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 V8 직관 트렌드 봇 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 복잡한 지표 삭제! 확실할 때 비중 실어 찌르고, 아니다 싶으면 가차 없이 자릅니다!"
+    start_msg = f"🚀 V8.2 5천원 필터링 봇 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 거래불가/먼지 코인 완벽 제외! 유효 종목만 관리합니다."
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -288,6 +302,7 @@ def main():
         try:
             now = time.time()
             
+            # 브리핑 전송
             if now - bot_stats["last_report_time"] > REPORT_INTERVAL:
                 send_system_briefing()
                 bot_stats["last_report_time"] = now
@@ -295,7 +310,8 @@ def main():
             krw = sync_balances()
             blacklist = {k: v for k, v in blacklist.items() if now - v < 1800}
 
-            if now - last_top_coins_time > 180: # 3분마다 스캔
+            # 3분마다 종목 스캔
+            if now - last_top_coins_time > 180: 
                 top_coins = get_top_coins()
                 last_top_coins_time = now
 
@@ -320,6 +336,7 @@ def main():
                 profit = (current_price - buy_price) / buy_price
                 held_time = now - pos['buy_time']
 
+                # 최고가 갱신
                 if current_price > pos['peak_price']: pos['peak_price'] = current_price
                 drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
@@ -329,7 +346,7 @@ def main():
                     blacklist[ticker] = now
                     continue
                 
-                # 2. 버리기: -2%가 안 됐어도 20일선을 하향 돌파하며 쏟아지면 가차 없이 컷
+                # 2. 버리기: -2%가 안 됐어도 20일선을 하향 돌파하며 쏟아지면 컷
                 if profit < 0 and is_obvious_loser(ticker, current_price):
                     sell_coin(ticker, "✂️ [추세 이탈 빠른 컷]", current_price, buy_price)
                     blacklist[ticker] = now
@@ -347,7 +364,7 @@ def main():
                 
                 # 5. 횡보 타임컷 (1시간 경과 시)
                 if held_time >= STAGNANT_SEC:
-                    if -0.01 < profit < 0.005: # -1% ~ +0.5% 사이에서 빌빌대면 기회비용 위해 버림
+                    if -0.01 < profit < 0.005: 
                         sell_coin(ticker, "🥱 [1시간 횡보 탈출]", current_price, buy_price)
                     continue
 
@@ -356,12 +373,13 @@ def main():
             # ======================
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
+                
+                # 💡 유효하게 관리 중인 종목 개수만 비교
                 if len(positions) >= MAX_POSITIONS: break
 
                 signal = check_buy_signal(ticker)
                 
                 if signal != "NONE":
-                    # STRONG일 때는 자본의 20%, NORMAL일 때는 10% 비중
                     weight = 0.20 if signal == "STRONG" else 0.10
                     buy_amount = max(krw * weight, MIN_ORDER)
                     
