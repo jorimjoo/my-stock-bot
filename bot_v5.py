@@ -56,7 +56,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 오리지널 턴어라운드 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 오리지널 개선판 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -82,7 +82,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 오리지널 복구판 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 오리지널 승률개선 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -138,7 +138,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 오리지널 지표: HMA & ADX
+# 5. 오리지널 지표: HMA & ADX (💡 DI 지표 추가)
 # =========================
 def wma(series, length):
     weights = np.arange(1, length + 1)
@@ -152,7 +152,7 @@ def hma(series, length):
     diff = 2 * wma_half - wma_full
     return wma(diff, sqrt_length)
 
-def calc_adx(df, period=14):
+def calc_adx_di(df, period=14):
     plus_dm = df['high'].diff()
     minus_dm = df['low'].shift(1) - df['low']
     
@@ -170,10 +170,10 @@ def calc_adx(df, period=14):
     
     dx = (plus_di - minus_di).abs() / (plus_di + minus_di) * 100
     adx = dx.ewm(alpha=1/period, adjust=False).mean()
-    return adx
+    return adx, plus_di, minus_di
 
 # =========================
-# 6. 종목 스캔 & 오리지널 매수 신호
+# 6. 종목 스캔 & 오리지널 매수 신호 (💡 폭락장 방어 추가)
 # =========================
 def get_top_coins():
     try:
@@ -204,17 +204,29 @@ def check_buy_signal(ticker):
         if df is None or len(df) < 50: return "NONE", 0.0
 
         df['hma'] = hma(df['close'], 14)
-        df['adx'] = calc_adx(df, 14)
+        df['ma20'] = df['close'].rolling(20).mean() # 20일선 추가
+        
+        adx, pdi, mdi = calc_adx_di(df, 14)
+        df['adx'] = adx
+        df['pdi'] = pdi
+        df['mdi'] = mdi
         
         hma_cur = df['hma'].iloc[-1]
         hma_prev = df['hma'].iloc[-2]
         hma_old = df['hma'].iloc[-3]
         
-        # 1. HMA가 하락에서 상승으로 반전 (가장 강력했던 오리지널 타점)
+        cur_price = df['close'].iloc[-1]
+        ma20_cur = df['ma20'].iloc[-1]
+        
+        # 1. HMA 반전 (오리지널)
         is_hma_turned = (hma_cur > hma_prev) and (hma_prev < hma_old)
+        
         adx_val = df['adx'].iloc[-1]
+        pdi_val = df['pdi'].iloc[-1]
+        mdi_val = df['mdi'].iloc[-1]
 
-        if is_hma_turned:
+        # 💡 떨어지는 칼날 방어: +DI가 -DI보다 클 때(상승 우세) & 현재가가 20일선 위에 있을 때만!
+        if is_hma_turned and (pdi_val > mdi_val) and (cur_price > ma20_cur):
             if adx_val >= 25:
                 return "STRONG", 0.30  # ADX 25 이상: 30% 비중
             elif 15 <= adx_val < 25:
@@ -244,7 +256,6 @@ def sync_balances():
         
         buy_amount = amt * avg_price
         
-        # 5,000원 필터 유지
         if buy_amount >= 5000:
             active_tickers.append(ticker)
             if ticker not in positions:
@@ -271,7 +282,7 @@ def buy_coin(ticker, krw, signal_type):
         }
         
         prefix = "🔥🔥 [강력 매수]" if signal_type == "STRONG" else "🔥 [일반 매수]"
-        send_msg(f"{prefix} {ticker} 진입! (HMA 반등 포착)")
+        send_msg(f"{prefix} {ticker} 진입! (HMA 상승 반전 + 상승 추세 확인)")
     except Exception as e:
         pass
 
@@ -298,8 +309,8 @@ def sell_coin(ticker, reason, current_price, buy_price):
 # 8. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 오리지널 턴어라운드 봇 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 수익 전환의 1등 공신이었던 HMA + ADX 로직으로 완벽 복구 완료!"
+    start_msg = f"🚀 오리지널 승률 개선판 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 방향성(DI) 추세 필터와 스마트 HMA 익절을 장착하여 잔파도에 털리지 않습니다!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -326,10 +337,9 @@ def main():
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 오리지널 매도 로직
+            # 스마트 매도 로직
             # ======================
             for ticker in holding_tickers:
-                # API 최적화: 개별 종목 차트 갱신으로 HMA 하락 이탈 실시간 감시
                 df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
                 if df is None or len(df) < 20: continue
                 
@@ -352,11 +362,11 @@ def main():
                     sell_coin(ticker, "🎯 [오리지널 +3% 익절]", current_price, buy_price)
                     continue
 
-                # 3. HMA 지표 이탈 시 방어 컷 (가장 확실했던 방패)
+                # 3. 💡 스마트 HMA 방어 (수익이 +0.5% 이상일 때만 HMA 꺾임 감시)
                 if hma_cur < hma_prev:
-                    sell_coin(ticker, "✂️ [HMA 꺾임 이탈 컷]", current_price, buy_price)
-                    blacklist[ticker] = now
-                    continue
+                    if profit > 0.005: # 수익 보존용 익절
+                        sell_coin(ticker, "🚀 [HMA 수익 굳히기 익절]", current_price, buy_price)
+                    # 손실 중일 때는 HMA가 꺾여도 잔파도로 간주하고 -2% 손절선까지 버팀!
 
             # ======================
             # 오리지널 매수 로직
