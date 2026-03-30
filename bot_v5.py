@@ -22,15 +22,16 @@ upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 # =========================
 TOP_N = 15
 MAX_POSITIONS = 15
-STOP_LOSS = -0.03       # -3% 칼손절
-TAKE_PROFIT = 0.05      # +5% 목표 익절
-TRAILING_STOP = 0.02    # 최고점 대비 2% 하락 시 익절
-TRAILING_START = 0.015  # 💡 수익이 +1.5% 이상일 때만 트레일링 활성화!
+STOP_LOSS = -0.03       
+TAKE_PROFIT = 0.05      
+TRAILING_STOP = 0.02    
+TRAILING_START = 0.015  
 
-BLACKLIST_HOLD = 1800   # 손절 후 30분 대기
+BLACKLIST_HOLD = 1800   
 
 MIN_ORDER = 6000        
 REPORT_INTERVAL = 3600  
+FEE_RATE = 1.0005       # 💡 수수료 0.05% 반영
 
 blacklist = {}
 entry_price = {}
@@ -80,7 +81,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V6.1 철통방어 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V7 전문가 최적화 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n\n"
@@ -125,7 +126,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 핵심 지표 (RSI 추가)
+# 5. 핵심 지표 계산
 # =========================
 def ta_rsi(series, period=14):
     delta = series.diff()
@@ -158,38 +159,36 @@ def get_top_coins():
 
         data.sort(key=lambda x: x[1], reverse=True)
         return [x[0] for x in data[:TOP_N]]
-    except:
+    except Exception as e:
+        print(f"TOP 코인 스캔 에러: {e}")
         return []
 
 # =========================
-# 매수 조건 (💡 필터 강화)
+# 매수 조건 (💡 API 방어 & 로깅 강화)
 # =========================
 def check_buy_signal(ticker):
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
-        if df is None or len(df) < 20: return False
+        if df is None or len(df) < 20: 
+            return False
 
         current_price = df['close'].iloc[-1]
         ma5 = get_ma(df, 5)
         ma20 = get_ma(df, 20)
         rsi = ta_rsi(df['close']).iloc[-1]
 
-        # 1. 정배열
         cond1 = current_price > ma5 > ma20
-
-        # 2. 양봉
         cond2 = df['close'].iloc[-1] > df['open'].iloc[-1]
-
-        # 3. 💡 거래량 최소 1.5배(50%) 이상 펌핑! (너무 쉬운 매수 방지)
+        
         vol1 = df['volume'].iloc[-2]
         vol2 = df['volume'].iloc[-3]
         cond3 = vol1 > (vol2 * 1.5)
-
-        # 4. 💡 과열 구간 추격매수 금지 (RSI 70 미만일 때만)
         cond4 = rsi < 70
 
         return cond1 and cond2 and cond3 and cond4
-    except:
+    except Exception as e:
+        # 💡 침묵의 에러 방지용 로그 출력
+        print(f"[{ticker}] 매수 조건 체크 중 에러 발생: {e}")
         return False
 
 # =========================
@@ -216,13 +215,13 @@ def get_balances():
     return result
 
 # =========================
-# 매수/매도 실행 (💡 텔레그램 에러 알림 의무화)
+# 매수/매도 실행
 # =========================
 def buy_coin(ticker, krw):
     try:
         res = upbit.buy_market_order(ticker, krw)
         if res is None or 'error' in res:
-            send_msg(f"❌ [매수 실패] {ticker}: {res}")
+            send_msg(f"❌ [매수 거절] {ticker}: {res}")
             return
             
         peak_price[ticker] = pyupbit.get_current_price(ticker)
@@ -235,11 +234,9 @@ def sell_coin(ticker, reason, current_price, buy_price, balance_amt):
         profit_rate = (current_price - buy_price) / buy_price * 100
         krw_profit = (current_price - buy_price) * balance_amt
         
-        # 실제 보유 수량을 API로 다시 한 번 안전하게 가져옴
         actual_balance = upbit.get_balance(ticker)
         res = upbit.sell_market_order(ticker, actual_balance)
         
-        # 💡 매도 실패 시 텔레그램으로 무조건 알림 (5000원 미만 거절 등)
         if res is None or 'error' in res:
             send_msg(f"🚨 [긴급] {ticker} 매도 실패! (직접 확인 요망)\n사유: {res}")
             return
@@ -255,11 +252,11 @@ def sell_coin(ticker, reason, current_price, buy_price, balance_amt):
         send_msg(f"🚨 [시스템 에러] {ticker} 매도 중 에러 발생: {e}")
 
 # =========================
-# 메인 루프
+# 메인 루프 (💡 API 최적화 적용)
 # =========================
 def main():
-    start_msg = f"🚀 V6.1 철통방어 에디션 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 에러 알림 강화, 거래량 1.5배 상승 시 진입!"
+    start_msg = f"🚀 V7 전문가 최적화 에디션 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 수수료 계산, API 429 방어, 에러 로깅 완벽 탑재!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -284,13 +281,23 @@ def main():
                 top_coins = get_top_coins()
                 last_top_coins_time = now
 
+            # 💡 [핵심] API 호출 최소화를 위해 보유 코인 현재가를 한 번에(Batch) 가져옴
+            holding_tickers = [k for k in balances.keys() if k != "KRW"]
+            current_prices = {}
+            if holding_tickers:
+                res_prices = pyupbit.get_current_price(holding_tickers)
+                if isinstance(res_prices, float) or isinstance(res_prices, int): 
+                    current_prices = {holding_tickers[0]: float(res_prices)}
+                elif isinstance(res_prices, dict): 
+                    current_prices = res_prices
+
             # ======================
-            # 매도 로직 (먼저 실행하여 물린 거 탈출 우선)
+            # 매도 로직
             # ======================
             for ticker, data in list(balances.items()):
                 if ticker == "KRW": continue
 
-                current_price = pyupbit.get_current_price(ticker)
+                current_price = current_prices.get(ticker)
                 if current_price is None: continue
                 
                 buy_price = data['avg_buy_price']
@@ -313,7 +320,7 @@ def main():
                     sell_coin(ticker, "✅ [목표가 익절]", current_price, buy_price, balance_amt)
                     continue
 
-                # 3. 트레일링 스탑 (수익 +1.5% 돌파 시에만 감시)
+                # 3. 트레일링 스탑
                 if profit >= TRAILING_START:
                     drop = (peak_price[ticker] - current_price) / peak_price[ticker]
                     if drop >= TRAILING_STOP:
@@ -323,7 +330,7 @@ def main():
             # ======================
             # 매수 로직
             # ======================
-            holding_count = len([k for k in balances.keys() if k != "KRW"])
+            holding_count = len(holding_tickers)
             
             for ticker in top_coins:
                 if ticker in balances: continue
@@ -332,15 +339,22 @@ def main():
 
                 if check_buy_signal(ticker):
                     buy_amount = max(krw * 0.2, MIN_ORDER)
-                    if krw >= buy_amount and buy_amount >= MIN_ORDER:
+                    
+                    # 💡 수수료(0.05%)를 포함한 필요 금액이 현재 잔고보다 작을 때만 매수!
+                    if krw >= (buy_amount * FEE_RATE) and buy_amount >= MIN_ORDER:
                         buy_coin(ticker, buy_amount)
-                        krw -= buy_amount 
+                        krw -= (buy_amount * FEE_RATE)
                         holding_count += 1
                         time.sleep(0.5)
 
-            time.sleep(2)
+                # 💡 API 과부하 429 에러 방지를 위한 필수 휴식 시간
+                time.sleep(0.2) 
+
+            # 메인 루프 딜레이 약간 늘림 (서버 및 API 안정성)
+            time.sleep(3)
 
         except Exception as e:
+            print(f"메인 루프 에러: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
