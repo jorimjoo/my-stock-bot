@@ -16,20 +16,21 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
-# 향후 시스템 확장을 위한 경로 세팅 반영
+# 향후 시스템 확장을 위한 프로그램 경로 세팅
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 오리지널 매매 설정값
+# 2. 💡 손익비 역전 매매 설정값
 # =========================
 TOP_N = 15
 MAX_POSITIONS = 15
 
-# 오리지널 수익/손절 룰
 TAKE_PROFIT = 0.03      # +3% 목표가 익절
-STOP_LOSS = -0.02       # -2% 칼손절
+STOP_LOSS = -0.012      # 💡 -1.2% 칼손절 (손실폭 대폭 축소)
+TRAILING_START = 0.015  # 💡 최소 +1.5% 이상 수익 시 방어 시작
+TRAILING_DROP = 0.005   # 고점 대비 -0.5% 하락 시 익절
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
@@ -56,7 +57,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 오리지널 개선판 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 오리지널 손익비 개선판 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -82,7 +83,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 오리지널 승률개선 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 오리지널 손익비개선 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -138,7 +139,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 오리지널 지표: HMA & ADX (💡 DI 지표 추가)
+# 5. 오리지널 지표: HMA & ADX (방향성 필터 유지)
 # =========================
 def wma(series, length):
     weights = np.arange(1, length + 1)
@@ -173,7 +174,7 @@ def calc_adx_di(df, period=14):
     return adx, plus_di, minus_di
 
 # =========================
-# 6. 종목 스캔 & 오리지널 매수 신호 (💡 폭락장 방어 추가)
+# 6. 종목 스캔 & 오리지널 매수 신호 (💡 가짜 반등 필터 추가)
 # =========================
 def get_top_coins():
     try:
@@ -196,15 +197,12 @@ def get_top_coins():
     except: return []
 
 def check_buy_signal(ticker):
-    """
-    반환값: (상태, 비중)
-    """
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute5", count=60)
         if df is None or len(df) < 50: return "NONE", 0.0
 
         df['hma'] = hma(df['close'], 14)
-        df['ma20'] = df['close'].rolling(20).mean() # 20일선 추가
+        df['ma20'] = df['close'].rolling(20).mean()
         
         adx, pdi, mdi = calc_adx_di(df, 14)
         df['adx'] = adx
@@ -218,19 +216,22 @@ def check_buy_signal(ticker):
         cur_price = df['close'].iloc[-1]
         ma20_cur = df['ma20'].iloc[-1]
         
-        # 1. HMA 반전 (오리지널)
+        # 💡 거래량 가짜 반등 방지: 이전 캔들보다 거래량이 20% 이상 터져야 인정
+        vol_cur = df['volume'].iloc[-2]
+        vol_prev = df['volume'].iloc[-3]
+        vol_spike = vol_cur > (vol_prev * 1.2)
+        
         is_hma_turned = (hma_cur > hma_prev) and (hma_prev < hma_old)
         
         adx_val = df['adx'].iloc[-1]
         pdi_val = df['pdi'].iloc[-1]
         mdi_val = df['mdi'].iloc[-1]
 
-        # 💡 떨어지는 칼날 방어: +DI가 -DI보다 클 때(상승 우세) & 현재가가 20일선 위에 있을 때만!
-        if is_hma_turned and (pdi_val > mdi_val) and (cur_price > ma20_cur):
+        if is_hma_turned and (pdi_val > mdi_val) and (cur_price > ma20_cur) and vol_spike:
             if adx_val >= 25:
-                return "STRONG", 0.30  # ADX 25 이상: 30% 비중
+                return "STRONG", 0.30  
             elif 15 <= adx_val < 25:
-                return "NORMAL", 0.10  # ADX 15~25: 10% 비중
+                return "NORMAL", 0.10  
                 
         return "NONE", 0.0
     except: return "NONE", 0.0
@@ -261,6 +262,7 @@ def sync_balances():
             if ticker not in positions:
                 positions[ticker] = {
                     'buy_price': avg_price,
+                    'peak_price': avg_price,
                     'buy_time': time.time()
                 }
                 
@@ -278,11 +280,12 @@ def buy_coin(ticker, krw, signal_type):
         current_price = pyupbit.get_current_price(ticker)
         positions[ticker] = {
             'buy_price': current_price,
+            'peak_price': current_price,
             'buy_time': time.time()
         }
         
         prefix = "🔥🔥 [강력 매수]" if signal_type == "STRONG" else "🔥 [일반 매수]"
-        send_msg(f"{prefix} {ticker} 진입! (HMA 상승 반전 + 상승 추세 확인)")
+        send_msg(f"{prefix} {ticker} 진입! (HMA 반등 + 거래량 펌핑)")
     except Exception as e:
         pass
 
@@ -309,8 +312,8 @@ def sell_coin(ticker, reason, current_price, buy_price):
 # 8. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 오리지널 승률 개선판 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 방향성(DI) 추세 필터와 스마트 HMA 익절을 장착하여 잔파도에 털리지 않습니다!"
+    start_msg = f"🚀 오리지널 손익비 개선판 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 가짜 반등 차단 및 -1.2% 짧은 칼손절 장착 완료!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -337,7 +340,7 @@ def main():
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 스마트 매도 로직
+            # 💡 스마트 손익비 매도 로직
             # ======================
             for ticker in holding_tickers:
                 df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
@@ -347,26 +350,35 @@ def main():
                 buy_price = positions[ticker]['buy_price']
                 profit = (current_price - buy_price) / buy_price
                 
+                # 최고가 갱신
+                if current_price > positions[ticker]['peak_price']:
+                    positions[ticker]['peak_price'] = current_price
+                
+                drop_from_peak = (positions[ticker]['peak_price'] - current_price) / positions[ticker]['peak_price']
+
                 df['hma'] = hma(df['close'], 14)
                 hma_cur = df['hma'].iloc[-1]
                 hma_prev = df['hma'].iloc[-2]
 
-                # 1. 절대 손절 (-2.0%)
+                # 1. 절대 손절 (-1.2%로 단축)
                 if profit <= STOP_LOSS:
-                    sell_coin(ticker, "☠️ [-2% 칼손절]", current_price, buy_price)
+                    sell_coin(ticker, "☠️ [-1.2% 짧은 손절]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
 
                 # 2. 목표가 익절 (+3.0%)
                 if profit >= TAKE_PROFIT:
-                    sell_coin(ticker, "🎯 [오리지널 +3% 익절]", current_price, buy_price)
+                    sell_coin(ticker, "🎯 [오리지널 +3% 잭팟]", current_price, buy_price)
+                    continue
+                    
+                # 3. 트레일링 익절 방어 (최소 +1.5% 돌파 후 고점 대비 -0.5% 하락 시)
+                if profit >= TRAILING_START and drop_from_peak >= TRAILING_DROP:
+                    sell_coin(ticker, "🚀 [수익 보존 트레일링]", current_price, buy_price)
                     continue
 
-                # 3. 💡 스마트 HMA 방어 (수익이 +0.5% 이상일 때만 HMA 꺾임 감시)
-                if hma_cur < hma_prev:
-                    if profit > 0.005: # 수익 보존용 익절
-                        sell_coin(ticker, "🚀 [HMA 수익 굳히기 익절]", current_price, buy_price)
-                    # 손실 중일 때는 HMA가 꺾여도 잔파도로 간주하고 -2% 손절선까지 버팀!
+                # 4. HMA 수익 보존 컷 (수익이 +1.0% 이상 났을 때만 HMA 꺾임을 반영)
+                if hma_cur < hma_prev and profit > 0.01:
+                    sell_coin(ticker, "🛡️ [HMA 꺾임 수익 굳히기]", current_price, buy_price)
 
             # ======================
             # 오리지널 매수 로직
