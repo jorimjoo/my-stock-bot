@@ -16,20 +16,20 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
-# 향후 시스템 확장을 위한 프로그램 경로 세팅
+# 💡 환경 셋팅 유지
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 매매 설정값 (바닥 줍줍 전략)
+# 2. 매매 설정값 (전문가 엑시트 전략)
 # =========================
 TOP_N = 15
 MAX_POSITIONS = 15
 
-TAKE_PROFIT = 0.025     # +2.5% 반등 목표가 (고무줄 스냅백 효과)
-STOP_LOSS = -0.025      # -2.5% 지하실 붕괴 시 손절
-STAGNANT_SEC = 7200     # 2시간(7200초) 내 반등 없으면 탈출
+TAKE_PROFIT = 0.03      # +3.0% (운 좋게 저항선 뚫고 폭등할 때의 잭팟)
+STOP_LOSS = -0.015      # -1.5% (바닥 이탈 시 빠른 손절)
+STAGNANT_SEC = 3600     # 💡 1시간(3600초) 내 확실한 반등 없으면 탈출
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
@@ -50,13 +50,13 @@ def get_kst():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 
 # =========================
-# 3. 🌐 웹 서버 (기절 방지)
+# 3. 🌐 웹 서버
 # =========================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 쿠퍼춘봉봇 V9 바닥줍줍 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 쿠퍼춘봉봇 V10 차트도사 에디션 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -82,7 +82,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V9 바닥줍줍 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V10 차트도사 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -138,25 +138,34 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 바닥 탐지 지표: 볼린저 밴드 & RSI
+# 5. 전문가 차트 지표: Stoch RSI & 망치형 캔들
 # =========================
 def get_bollinger_bands(df, window=20, num_std=2):
     rolling_mean = df['close'].rolling(window=window).mean()
     rolling_std = df['close'].rolling(window=window).std()
     lower_band = rolling_mean - (rolling_std * num_std)
-    return rolling_mean, lower_band
+    upper_band = rolling_mean + (rolling_std * num_std)
+    return rolling_mean, lower_band, upper_band
 
-def ta_rsi(series, period=14):
+def ta_stoch_rsi(series, period=14, smoothK=3, smoothD=3):
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=period-1, adjust=False).mean()
     ema_down = down.ewm(com=period-1, adjust=False).mean()
     rs = ema_up / ema_down
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    
+    rsi_min = rsi.rolling(period).min()
+    rsi_max = rsi.rolling(period).max()
+    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min) * 100
+    
+    k = stoch_rsi.rolling(smoothK).mean()
+    d = k.rolling(smoothD).mean()
+    return k, d
 
 # =========================
-# 6. 종목 스캔 & 💡 바닥 줍줍 매수 신호
+# 6. 종목 스캔 & 💡 매수 (망치형 + Stoch RSI)
 # =========================
 def get_top_coins():
     try:
@@ -179,45 +188,46 @@ def get_top_coins():
     except: return []
 
 def check_buy_signal(ticker):
-    """
-    반환값: (상태, 비중) - 바닥을 찍고 반등하는 종목만 포착
-    """
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute5", count=40)
         if df is None or len(df) < 30: return "NONE", 0.0
 
-        df['ma20'], df['lower_band'] = get_bollinger_bands(df)
-        df['rsi'] = ta_rsi(df['close'])
+        df['ma20'], df['lower_band'], df['upper_band'] = get_bollinger_bands(df)
+        k, d = ta_stoch_rsi(df['close'])
+        df['stoch_k'] = k
+        df['stoch_d'] = d
         
         cur_close = df['close'].iloc[-1]
         cur_open = df['open'].iloc[-1]
         cur_low = df['low'].iloc[-1]
+        cur_high = df['high'].iloc[-1]
         
         prev_close = df['close'].iloc[-2]
-        prev_open = df['open'].iloc[-2]
-
         lower_band = df['lower_band'].iloc[-1]
-        rsi_val = df['rsi'].iloc[-1]
-        rsi_prev = df['rsi'].iloc[-2]
-
-        # 1. 💡 공포의 바닥 진입: RSI가 35 미만으로 심하게 과매도 되었는가?
-        cond_rsi_oversold = rsi_prev < 35 or rsi_val < 35
         
-        # 2. 💡 밴드 하단 터치: 가격이 볼린저 밴드 하단(한계선)을 터치하거나 그 아래에 있는가?
-        cond_band_touch = cur_low <= lower_band or prev_close <= lower_band
-        
-        # 3. 💡 반등 시작 확인: 직전 캔들은 파란 불(음봉)이었는데, 지금은 빨간 불(양봉)로 고개를 드는가?
-        cond_bounce = (prev_close < prev_open) and (cur_close > cur_open)
+        stoch_k_val = df['stoch_k'].iloc[-1]
+        stoch_d_val = df['stoch_d'].iloc[-1]
 
-        # 3가지가 모두 맞으면 "남들이 버린 헐값 코인이 고개를 든다"고 판단!
-        if cond_rsi_oversold and cond_band_touch and cond_bounce:
-            return "NORMAL", 0.15  # 비중 15% 진입
+        # 1. 💡 캔들 분석: 밑꼬리가 긴 망치형 양봉인가? (누군가 바닥에서 들어 올림)
+        body = abs(cur_close - cur_open)
+        lower_shadow = min(cur_open, cur_close) - cur_low
+        is_hammer = (lower_shadow > body * 1.5) and (cur_close > cur_open)
+        
+        # 2. 💡 지표 분석: 스토캐스틱 RSI가 20 이하(극심한 과매도)에서 K선이 D선을 돌파(골든크로스)
+        is_stoch_gold = (stoch_k_val > stoch_d_val) and (stoch_k_val < 25)
+        
+        # 3. 💡 밴드 터치: 하단을 터치했거나 뚫고 내려갔던 전적이 있는가?
+        is_band_touch = (cur_low <= lower_band) or (df['low'].iloc[-2] <= df['lower_band'].iloc[-2])
+
+        # 3가지 차트 도사 조건이 완벽히 맞물릴 때 진입!
+        if is_hammer and is_stoch_gold and is_band_touch:
+            return "NORMAL", 0.15  
                 
         return "NONE", 0.0
     except: return "NONE", 0.0
 
 # =========================
-# 7. 장부 관리 및 실행 (5,000원 필터 유지)
+# 7. 장부 관리 및 실행 (5,000원 필터)
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -262,7 +272,7 @@ def buy_coin(ticker, krw, signal_type):
             'buy_time': time.time()
         }
         
-        send_msg(f"🎯 [바닥 줍줍] {ticker} 진입! (볼린저 하단 + RSI 과매도 반등)")
+        send_msg(f"🎯 [망치형 줍줍] {ticker} 진입! (밑꼬리 확인+스토캐스틱 골크)")
     except Exception as e:
         pass
 
@@ -281,7 +291,7 @@ def sell_coin(ticker, reason, current_price, buy_price):
         bot_stats["profit_krw"] += krw_profit
         if krw_profit > 0: bot_stats["wins"] += 1
         
-        send_msg(f"{reason} {ticker} ({profit_rate:+.2f}%) / 손익: {krw_profit:,.0f}원")
+        send_msg(f"{reason} {ticker} ({profit_rate:+.2f}%) / 익손절: {krw_profit:,.0f}원")
     except Exception as e:
         pass
 
@@ -289,8 +299,8 @@ def sell_coin(ticker, reason, current_price, buy_price):
 # 8. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 V9 바닥 줍줍 에디션 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 폭락장 전용 방패 장착! 볼린저 밴드 하단과 RSI 낙폭 과대를 노립니다!"
+    start_msg = f"🚀 V10 차트도사 에디션 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 망치형 캔들 분석과 20일선 저항 얄미운 먹튀 전략 탑재!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -317,7 +327,7 @@ def main():
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 스마트 매도 로직
+            # 💡 매도 (차트도사 동적 저항 엑시트)
             # ======================
             for ticker in holding_tickers:
                 df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
@@ -328,26 +338,35 @@ def main():
                 profit = (current_price - buy_price) / buy_price
                 held_time = now - positions[ticker]['buy_time']
 
-                # 1. 지하실 붕괴 손절 (-2.5%)
+                df['ma20'] = df['close'].rolling(20).mean()
+                ma20_cur = df['ma20'].iloc[-1]
+
+                # 1. 💡 동적 저항 익절 (20일선 저항 터치 시 얄밉게 먹튀)
+                # 현재가가 20일선에 도달했고, 수익이 수수료를 뺀 +0.5% 이상이라면 즉시 익절
+                if (current_price >= ma20_cur) and (profit >= 0.005):
+                    sell_coin(ticker, "🛡️ [20일선 저항 얄미운 먹튀]", current_price, buy_price)
+                    continue
+
+                # 2. 잭팟 목표가 (+3.0%) - 저항 뚫고 날아갈 때
+                if profit >= TAKE_PROFIT:
+                    sell_coin(ticker, "🎯 [잭팟! 오버슈팅 익절]", current_price, buy_price)
+                    continue
+
+                # 3. 바닥 이탈 칼손절 (-1.5%)
                 if profit <= STOP_LOSS:
-                    sell_coin(ticker, "☠️ [-2.5% 바닥 붕괴 손절]", current_price, buy_price)
+                    sell_coin(ticker, "☠️ [바닥 지지 실패 손절]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
 
-                # 2. 반등 목표가 익절 (+2.5%)
-                if profit >= TAKE_PROFIT:
-                    sell_coin(ticker, "🎯 [반등 목표가 익절]", current_price, buy_price)
-                    continue
-
-                # 3. 횡보 타임컷 (2시간 경과)
+                # 4. 횡보 타임컷 단축 (1시간 경과)
                 if held_time >= STAGNANT_SEC:
                     if profit > 0:
-                        sell_coin(ticker, "🥱 [2시간 횡보 약익절 탈출]", current_price, buy_price)
+                        sell_coin(ticker, "🥱 [1시간 횡보 약수익 탈출]", current_price, buy_price)
                     else:
-                        sell_coin(ticker, "⏰ [2시간 횡보 타임컷 손절]", current_price, buy_price)
+                        sell_coin(ticker, "⏰ [1시간 횡보 타임컷 손절]", current_price, buy_price)
 
             # ======================
-            # 바닥 줍줍 매수 로직
+            # 매수 (차트도사 바닥 줍줍)
             # ======================
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
