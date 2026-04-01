@@ -22,14 +22,14 @@ IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 💡 손익비 역전 매매 설정값
+# 2. 매매 설정값 (손익비 방어 & 스나이퍼 매수)
 # =========================
 TOP_N = 15
 MAX_POSITIONS = 15
 
 TAKE_PROFIT = 0.03      # +3% 목표가 익절
-STOP_LOSS = -0.012      # 💡 -1.2% 칼손절 (손실폭 대폭 축소)
-TRAILING_START = 0.015  # 💡 최소 +1.5% 이상 수익 시 방어 시작
+STOP_LOSS = -0.012      # -1.2% 칼손절
+TRAILING_START = 0.015  # 최소 +1.5% 이상 수익 시 방어 시작
 TRAILING_DROP = 0.005   # 고점 대비 -0.5% 하락 시 익절
 
 MIN_ORDER = 6000        
@@ -57,7 +57,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 오리지널 손익비 개선판 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V8.3 스나이퍼 에디션 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -83,7 +83,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 오리지널 손익비개선 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V8.3 스나이퍼 매수 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -139,7 +139,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 오리지널 지표: HMA & ADX (방향성 필터 유지)
+# 5. 지표 계산 함수 (HMA, ADX, RSI)
 # =========================
 def wma(series, length):
     weights = np.arange(1, length + 1)
@@ -173,8 +173,17 @@ def calc_adx_di(df, period=14):
     adx = dx.ewm(alpha=1/period, adjust=False).mean()
     return adx, plus_di, minus_di
 
+def ta_rsi(series, period=14):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=period-1, adjust=False).mean()
+    ema_down = down.ewm(com=period-1, adjust=False).mean()
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
+
 # =========================
-# 6. 종목 스캔 & 오리지널 매수 신호 (💡 가짜 반등 필터 추가)
+# 6. 종목 스캔 & 💡 스나이퍼 매수 신호 판별
 # =========================
 def get_top_coins():
     try:
@@ -197,47 +206,56 @@ def get_top_coins():
     except: return []
 
 def check_buy_signal(ticker):
+    """
+    반환값: (상태, 비중) - 확률 높은 스나이퍼 타점만 조준
+    """
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute5", count=60)
         if df is None or len(df) < 50: return "NONE", 0.0
 
         df['hma'] = hma(df['close'], 14)
+        df['ma5'] = df['close'].rolling(5).mean()
         df['ma20'] = df['close'].rolling(20).mean()
+        df['rsi'] = ta_rsi(df['close'])
         
         adx, pdi, mdi = calc_adx_di(df, 14)
-        df['adx'] = adx
-        df['pdi'] = pdi
-        df['mdi'] = mdi
         
+        cur_close = df['close'].iloc[-1]
+        cur_open = df['open'].iloc[-1]
+        ma5_cur = df['ma5'].iloc[-1]
+        ma20_cur = df['ma20'].iloc[-1]
         hma_cur = df['hma'].iloc[-1]
         hma_prev = df['hma'].iloc[-2]
-        hma_old = df['hma'].iloc[-3]
-        
-        cur_price = df['close'].iloc[-1]
-        ma20_cur = df['ma20'].iloc[-1]
-        
-        # 💡 거래량 가짜 반등 방지: 이전 캔들보다 거래량이 20% 이상 터져야 인정
-        vol_cur = df['volume'].iloc[-2]
-        vol_prev = df['volume'].iloc[-3]
-        vol_spike = vol_cur > (vol_prev * 1.2)
-        
-        is_hma_turned = (hma_cur > hma_prev) and (hma_prev < hma_old)
-        
-        adx_val = df['adx'].iloc[-1]
-        pdi_val = df['pdi'].iloc[-1]
-        mdi_val = df['mdi'].iloc[-1]
 
-        if is_hma_turned and (pdi_val > mdi_val) and (cur_price > ma20_cur) and vol_spike:
-            if adx_val >= 25:
-                return "STRONG", 0.30  
-            elif 15 <= adx_val < 25:
-                return "NORMAL", 0.10  
+        # 1. 완전 정배열 확인 (5일선이 20일선 위, 현재가가 5일선 위)
+        cond_trend = (ma5_cur > ma20_cur) and (cur_close > ma5_cur)
+        
+        # 2. HMA 우상향 확인
+        cond_hma = hma_cur > hma_prev
+        
+        # 3. 찐추세 & 방향성 (ADX 25 이상 & +DI가 -DI 압도)
+        cond_adx = (adx.iloc[-1] >= 25) and (pdi.iloc[-1] > mdi.iloc[-1])
+        
+        # 4. 세력의 흔적 (직전 캔들 거래량이 그 전 캔들보다 50% 이상 폭증)
+        vol_prev = df['volume'].iloc[-2]
+        vol_old = df['volume'].iloc[-3]
+        cond_vol = vol_prev > (vol_old * 1.5)
+        
+        # 5. 과매수 구간 추격 방지 (RSI 70 미만)
+        cond_rsi = df['rsi'].iloc[-1] < 70
+        
+        # 6. 현재 봉이 양봉일 것
+        cond_yangbong = cur_close > cur_open
+
+        # 💡 위 6가지 깐깐한 조건이 모두 맞아야만 방아쇠를 당김
+        if cond_trend and cond_hma and cond_adx and cond_vol and cond_rsi and cond_yangbong:
+            return "STRONG", 0.20  # 비중 20% 진입
                 
         return "NONE", 0.0
     except: return "NONE", 0.0
 
 # =========================
-# 7. 장부 관리 및 실행 
+# 7. 장부 관리 및 실행 (5,000원 필터 유지)
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -284,8 +302,7 @@ def buy_coin(ticker, krw, signal_type):
             'buy_time': time.time()
         }
         
-        prefix = "🔥🔥 [강력 매수]" if signal_type == "STRONG" else "🔥 [일반 매수]"
-        send_msg(f"{prefix} {ticker} 진입! (HMA 반등 + 거래량 펌핑)")
+        send_msg(f"🎯 [스나이퍼 매수] {ticker} 진입! (골든크로스+거래량폭발+ADX25+)")
     except Exception as e:
         pass
 
@@ -312,8 +329,8 @@ def sell_coin(ticker, reason, current_price, buy_price):
 # 8. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 오리지널 손익비 개선판 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 가짜 반등 차단 및 -1.2% 짧은 칼손절 장착 완료!"
+    start_msg = f"🚀 V8.3 스나이퍼 에디션 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ ADX 25 상향, 골든크로스 필수, 거래량 50% 폭발 등 매수 문턱 대폭 강화!"
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -340,7 +357,7 @@ def main():
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 💡 스마트 손익비 매도 로직
+            # 스마트 손익비 매도 로직
             # ======================
             for ticker in holding_tickers:
                 df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
@@ -360,15 +377,15 @@ def main():
                 hma_cur = df['hma'].iloc[-1]
                 hma_prev = df['hma'].iloc[-2]
 
-                # 1. 절대 손절 (-1.2%로 단축)
+                # 1. 절대 손절 (-1.2% 짧은 손절)
                 if profit <= STOP_LOSS:
-                    sell_coin(ticker, "☠️ [-1.2% 짧은 손절]", current_price, buy_price)
+                    sell_coin(ticker, "☠️ [-1.2% 방어 손절]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
 
                 # 2. 목표가 익절 (+3.0%)
                 if profit >= TAKE_PROFIT:
-                    sell_coin(ticker, "🎯 [오리지널 +3% 잭팟]", current_price, buy_price)
+                    sell_coin(ticker, "🎯 [목표가 +3% 잭팟]", current_price, buy_price)
                     continue
                     
                 # 3. 트레일링 익절 방어 (최소 +1.5% 돌파 후 고점 대비 -0.5% 하락 시)
@@ -381,7 +398,7 @@ def main():
                     sell_coin(ticker, "🛡️ [HMA 꺾임 수익 굳히기]", current_price, buy_price)
 
             # ======================
-            # 오리지널 매수 로직
+            # 스나이퍼 매수 로직
             # ======================
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
