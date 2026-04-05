@@ -16,20 +16,21 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
-# 향후 시스템 확장을 위한 프로그램 경로 세팅
+# 시스템 경로 유지
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 매매 설정값
+# 2. 스윙/장기 매매 설정값 (비중 UP, 횟수 DOWN)
 # =========================
-TOP_N = 15
-MAX_POSITIONS = 15
+TOP_N = 10              # 상위 10개 우량/주도 코인만 집중 감시
+MAX_POSITIONS = 3       # 💡 3종목에 30%씩 비중을 크게 실어서 진입!
 
-TAKE_PROFIT = 0.03      # +3.0% (저항선 뚫고 폭등할 때의 잭팟)
-STOP_LOSS = -0.015      # -1.5% (눌림목이 아니라 지하실일 경우 빠른 손절)
-STAGNANT_SEC = 3600     # 1시간 내 횡보 탈출
+# 동적 매도 설정
+TRAILING_ACTIVATE = 0.05 # 💡 수익이 +5% 이상일 때부터 고점 추적 (작은 수익에 안 팖)
+TRAILING_DROP = 0.02     # 최고점 대비 -2% 꺾이면 하락 징후로 보고 익절
+HARD_STOP_LOSS = -0.03   # 💡 최후의 보루: -3% 도달 시 어떤 이유든 칼손절 (비중이 크므로 필수)
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
@@ -50,13 +51,13 @@ def get_kst():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 
 # =========================
-# 3. 🌐 웹 서버
+# 3. 🌐 웹 서버 (기절 방지)
 # =========================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 쿠퍼춘봉봇 V11 유튜브 고수 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V12 스윙 마스터 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -82,12 +83,12 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V11 유튜브 고수타점 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V12 스윙/장기 에디션 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
-        msg += f"🎯 관리 중인 유효 종목: {len(positions)}/{MAX_POSITIONS}개\n\n"
-        msg += f"📈 [전체 누적 통계]\n- 수익: {bot_stats['profit_krw']:,.0f}원\n- 거래: {bot_stats['trades']}회 (승률 {win_rate:.1f}%)"
+        msg += f"🎯 보유 종목 (최대 3개 집중): {len(positions)}/{MAX_POSITIONS}개\n\n"
+        msg += f"📈 [누적 통계]\n- 수익: {bot_stats['profit_krw']:,.0f}원\n- 거래: {bot_stats['trades']}회 (승률 {win_rate:.1f}%)"
         
         send_msg(msg)
     except: pass
@@ -109,17 +110,6 @@ def telegram_polling():
                     if "/상태" in msg_text or "상태" == msg_text:
                         send_system_briefing()
 
-                    elif "/매수테스트" in msg_text:
-                        send_msg("🔥 강제 매수 테스트! 비트코인 6,000원어치 매수를 시도합니다!")
-                        try:
-                            if upbit.get_balance("KRW") > 6000:
-                                upbit.buy_market_order("KRW-BTC", 6000)
-                                send_msg("✅ [성공] 6,000원어치 매수 체결 완료!")
-                            else:
-                                send_msg("❌ 현금이 부족합니다.")
-                        except Exception as e:
-                            send_msg(f"❌ 매수 실패: {e}")
-
                     elif "매도" in msg_text:
                         ticker_raw = msg_text.replace("매도", "").replace("/", "").strip()
                         if ticker_raw:
@@ -129,7 +119,7 @@ def telegram_polling():
                                 try:
                                     upbit.sell_market_order(ticker, balance)
                                     positions.pop(ticker, None)
-                                    send_msg(f"⚡ [수동 매도 완료] {ticker} 전량 처분!")
+                                    send_msg(f"⚡ [수동 매도 완료] {ticker} 전량 익절!")
                                 except Exception as e:
                                     send_msg(f"❌ [수동 매도 실패]: {e}")
                             else:
@@ -138,7 +128,16 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 종목 스캔 & 💡 쇼츠 영상 매수 타점 완벽 이식
+# 5. 차트 분석 지표 (일봉 + 15분봉)
+# =========================
+def get_bollinger_bands(df, window=20, num_std=2):
+    rolling_mean = df['close'].rolling(window=window).mean()
+    rolling_std = df['close'].rolling(window=window).std()
+    lower_band = rolling_mean - (rolling_std * num_std)
+    return lower_band
+
+# =========================
+# 6. 종목 스캔 & 💡 일봉+15분봉 복합 분석 매수 신호
 # =========================
 def get_top_coins():
     try:
@@ -162,62 +161,45 @@ def get_top_coins():
 
 def check_buy_signal(ticker):
     """
-    영상 속 3조건: 횡보 후 눌림 -> 거래량 터짐 -> 호가창 매도벽 사라짐
+    반환값: (진입 여부, 일봉 20일선 가격)
     """
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="minute5", count=40)
-        if df is None or len(df) < 30: return "NONE", 0.0
-
-        # --- 💡 조건 1: 주가가 횡보하다 살짝 눌린 자리 ---
-        # 최근 15봉(약 1시간 15분) 동안의 최고-최저 변동폭이 3% 이내면 '횡보'로 간주
-        recent_df = df.iloc[-16:-1]
-        max_p = recent_df['high'].max()
-        min_p = recent_df['low'].min()
-        is_sideways = (max_p - min_p) / min_p < 0.03
+        # 💡 1. 일봉 분석 (큰 추세 확인)
+        df_day = pyupbit.get_ohlcv(ticker, interval="day", count=30)
+        if df_day is None or len(df_day) < 25: return False, 0
         
-        cur_close = df['close'].iloc[-1]
-        cur_open = df['open'].iloc[-1]
-        cur_low = df['low'].iloc[-1]
-        ma20 = df['close'].rolling(20).mean().iloc[-1]
+        day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
+        day_close = df_day['close'].iloc[-1]
         
-        # 저가가 20일선(또는 살짝 아래)을 터치하고 양봉으로 고개를 드는(눌림목 반등) 자리
-        is_dip_and_bounce = (cur_low <= ma20 * 1.002) and (cur_close > cur_open)
-        
-        # --- 💡 조건 2: 거래량이 줄어들었다가 다시 터지는 순간 ---
-        vol_ma10 = df['volume'].rolling(10).mean().iloc[-2] # 10주기 평균 거래량
-        recent_vol_avg = df['volume'].iloc[-6:-2].mean()    # 최근 거래량 (말라있었는지 확인)
-        cur_vol = df['volume'].iloc[-1]
-        prev_vol = df['volume'].iloc[-2]
-        
-        is_vol_dried = recent_vol_avg < vol_ma10 # 거래량이 죽어있었다
-        # 현재 혹은 직전 캔들의 거래량이 평균 대비 2배 이상 펌핑됨
-        is_vol_spiked = (cur_vol > vol_ma10 * 2.0) or (prev_vol > vol_ma10 * 2.0)
-
-        # 차트 조건 통과 여부 1차 확인 (통과한 놈만 호가창을 봐서 API 낭비 방지)
-        if not (is_sideways and is_dip_and_bounce and is_vol_dried and is_vol_spiked):
-            return "NONE", 0.0
-
-        # --- 💡 조건 3: 호가창에 매도 물량이 갑자기 빠질 때 ---
-        orderbook = pyupbit.get_orderbook(ticker)
-        if orderbook is None: return "NONE", 0.0
-        
-        # 리스트로 반환될 경우 처리
-        if isinstance(orderbook, list): orderbook = orderbook[0]
+        # 큰 추세가 하락(일봉 20일선 아래)이면 아예 쳐다보지 않음
+        if day_close < day_ma20:
+            return False, 0
             
-        total_ask = orderbook.get('total_ask_size', 1) # 팔려는 물량 (매도벽)
-        total_bid = orderbook.get('total_bid_size', 0) # 사려는 물량 (매수벽)
+        time.sleep(0.1) # API 보호
         
-        # 사려는 물량이 팔려는 물량보다 1.5배 이상 많음 (매도벽이 얇아져서 치고 올라가기 좋음)
-        is_orderbook_good = total_bid > (total_ask * 1.5)
-
-        if is_orderbook_good:
-            return "STRONG", 0.20  # 3조건 모두 충족! 20% 비중으로 강력 매수!
-                
-        return "NONE", 0.0
-    except: return "NONE", 0.0
+        # 💡 2. 15분봉 분석 (눌림목 타점 잡기)
+        df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=40)
+        if df_15m is None or len(df_15m) < 30: return False, 0
+        
+        df_15m['lower_band'] = get_bollinger_bands(df_15m)
+        cur_close = df_15m['close'].iloc[-1]
+        cur_open = df_15m['open'].iloc[-1]
+        cur_low = df_15m['low'].iloc[-1]
+        
+        lower_band = df_15m['lower_band'].iloc[-1]
+        
+        # 조건: 15분봉 밴드 하단을 터치(눌림)했고, 현재 양봉으로 전환 중일 때 진입
+        is_dipped = cur_low <= lower_band
+        is_bouncing = cur_close > cur_open
+        
+        if is_dipped and is_bouncing:
+            return True, day_ma20
+            
+        return False, 0
+    except: return False, 0
 
 # =========================
-# 6. 장부 관리 및 실행 (5,000원 필터 유지)
+# 7. 장부 관리 및 실행 
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -240,9 +222,11 @@ def sync_balances():
         if buy_amount >= 5000:
             active_tickers.append(ticker)
             if ticker not in positions:
+                # 봇 재시작 대비 임시값 할당 (루프에서 갱신됨)
                 positions[ticker] = {
                     'buy_price': avg_price,
-                    'buy_time': time.time()
+                    'peak_price': avg_price,
+                    'day_ma20': 0 
                 }
                 
     for t in list(positions.keys()):
@@ -251,7 +235,7 @@ def sync_balances():
             
     return krw_bal
 
-def buy_coin(ticker, krw, signal_type):
+def buy_coin(ticker, krw, day_ma20):
     try:
         res = upbit.buy_market_order(ticker, krw)
         if res is None or 'error' in res: return
@@ -259,12 +243,12 @@ def buy_coin(ticker, krw, signal_type):
         current_price = pyupbit.get_current_price(ticker)
         positions[ticker] = {
             'buy_price': current_price,
-            'buy_time': time.time()
+            'peak_price': current_price,
+            'day_ma20': day_ma20
         }
         
-        send_msg(f"🎯 [유튜브 고수 타점] {ticker} 진입!\n(횡보 후 눌림 + 거래량 폭발 + 매도벽 증발)")
-    except Exception as e:
-        pass
+        send_msg(f"🎯 [비중 30% 진입] {ticker}\n(일봉 우상향 중 15분봉 눌림목 포착!)")
+    except Exception as e: pass
 
 def sell_coin(ticker, reason, current_price, buy_price):
     try:
@@ -281,16 +265,15 @@ def sell_coin(ticker, reason, current_price, buy_price):
         bot_stats["profit_krw"] += krw_profit
         if krw_profit > 0: bot_stats["wins"] += 1
         
-        send_msg(f"{reason} {ticker} ({profit_rate:+.2f}%) / 손익: {krw_profit:,.0f}원")
-    except Exception as e:
-        pass
+        send_msg(f"{reason} {ticker} ({profit_rate:+.2f}%) / 익손절: {krw_profit:,.0f}원")
+    except Exception as e: pass
 
 # =========================
-# 7. 메인 루프
+# 8. 메인 루프 (💡 동적 대응 시나리오 적용)
 # =========================
 def main():
-    start_msg = f"🚀 V11 유튜브 고수 에디션 시작! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 3가지 조건 (눌림목, 거래량 펌핑, 호가창 분석) 완벽 탑재!"
+    start_msg = f"🚀 V12 스윙 마스터 전략 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 잔파도 무시! 30% 비중으로 큰 추세를 먹고, 하락 전환 시 끊어냅니다."
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -308,72 +291,82 @@ def main():
                 bot_stats["last_report_time"] = now
 
             krw = sync_balances()
-            blacklist = {k: v for k, v in blacklist.items() if now - v < 1800}
+            blacklist = {k: v for k, v in blacklist.items() if now - v < 3600} # 손절 시 1시간 관망
 
-            if now - last_top_coins_time > 180: 
+            if now - last_top_coins_time > 300: # 5분마다 종목 갱신
                 top_coins = get_top_coins()
                 last_top_coins_time = now
 
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 💡 매도 (차트도사 동적 저항 엑시트 유지)
+            # 💡 시나리오 기반 동적 매도 로직
             # ======================
             for ticker in holding_tickers:
-                df = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
-                if df is None or len(df) < 20: continue
+                # 현재가 확인
+                current_price = pyupbit.get_current_price(ticker)
+                if current_price is None: continue
                 
-                current_price = df['close'].iloc[-1]
-                buy_price = positions[ticker]['buy_price']
+                pos = positions[ticker]
+                buy_price = pos['buy_price']
                 profit = (current_price - buy_price) / buy_price
-                held_time = now - positions[ticker]['buy_time']
+                
+                # 최고가 갱신
+                if current_price > pos['peak_price']: pos['peak_price'] = current_price
+                drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
-                df['ma20'] = df['close'].rolling(20).mean()
-                ma20_cur = df['ma20'].iloc[-1]
+                # 일봉 추세 실시간 확인 (시나리오 2, 3 판별용)
+                df_day = pyupbit.get_ohlcv(ticker, interval="day", count=25)
+                if df_day is not None and len(df_day) >= 20:
+                    current_day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
+                else:
+                    current_day_ma20 = pos['day_ma20'] # API 실패 시 기존 값 유지
 
-                # 1. 동적 저항 익절 (20일선 저항 터치 시 먹튀)
-                if (current_price >= ma20_cur) and (profit >= 0.005):
-                    sell_coin(ticker, "🛡️ [20일선 저항 얄미운 먹튀]", current_price, buy_price)
-                    continue
-
-                # 2. 잭팟 목표가 (+3.0%) 
-                if profit >= TAKE_PROFIT:
-                    sell_coin(ticker, "🎯 [잭팟! 오버슈팅 익절]", current_price, buy_price)
-                    continue
-
-                # 3. 칼손절 (-1.5%)
-                if profit <= STOP_LOSS:
-                    sell_coin(ticker, "☠️ [눌림목 지지 실패 손절]", current_price, buy_price)
+                # [시나리오 1] 장기 상승 오버슈팅 (수익 극대화 후 하락 예측 시 매도)
+                if profit >= TRAILING_ACTIVATE:
+                    if drop_from_peak >= TRAILING_DROP:
+                        sell_coin(ticker, "💸 [추세 꺾임 감지 최고점 익절]", current_price, buy_price)
+                        continue
+                
+                # [시나리오 3] 분석 결과 지속 하락 예측 (일봉 추세선 붕괴)
+                if profit < 0 and current_price < current_day_ma20:
+                    # 일봉 20일선이 깨지면 더 볼 것 없이 컷!
+                    sell_coin(ticker, "✂️ [일봉 추세 붕괴 빠른 컷]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
+                    
+                # [안전장치] 시나리오 2(단기 하락 버티기) 중이라도 -3%에 닿으면 즉시 컷
+                if profit <= HARD_STOP_LOSS:
+                    sell_coin(ticker, "☠️ [-3% 방어선 칼손절]", current_price, buy_price)
+                    blacklist[ticker] = now
+                    continue
+                    
+                # 그 외의 경우(수익이 나고 있거나, -1~2% 하락 중이지만 일봉 추세가 살아있을 때)는 
+                # 흔들기에 당하지 않고 지속 HOLD!
 
-                # 4. 횡보 타임컷 단축 (1시간 경과)
-                if held_time >= STAGNANT_SEC:
-                    if profit > 0:
-                        sell_coin(ticker, "🥱 [1시간 횡보 약수익 탈출]", current_price, buy_price)
-                    else:
-                        sell_coin(ticker, "⏰ [1시간 횡보 타임컷 손절]", current_price, buy_price)
+                time.sleep(0.2)
 
             # ======================
-            # 매수 (유튜브 쇼츠 3박자 타점)
+            # 💡 비중 UP 스윙 매수 로직
             # ======================
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
                 if len(positions) >= MAX_POSITIONS: break
 
-                signal, weight = check_buy_signal(ticker)
+                is_buy, day_ma20 = check_buy_signal(ticker)
                 
-                if signal != "NONE":
-                    buy_amount = max(krw * weight, MIN_ORDER)
+                if is_buy:
+                    # 💡 비중 30% 할당 (선택과 집중)
+                    buy_amount = max(krw * 0.30, MIN_ORDER)
                     
                     if krw >= (buy_amount * FEE_RATE) and buy_amount >= MIN_ORDER:
-                        buy_coin(ticker, buy_amount, signal)
+                        buy_coin(ticker, buy_amount, day_ma20)
                         krw -= (buy_amount * FEE_RATE)
                         time.sleep(0.5)
 
                 time.sleep(0.2) 
 
-            time.sleep(2)
+            time.sleep(3)
 
         except Exception as e:
             time.sleep(5)
