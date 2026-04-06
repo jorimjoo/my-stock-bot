@@ -16,7 +16,6 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
-# 시스템 경로 유지
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
@@ -57,7 +56,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V13 투트랙 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V13.2 초고속 스캔 에디션 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -83,7 +82,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V13 투트랙 엔진 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V13.2 초고속 스캔 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -128,7 +127,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 종목 스캔 (거래대금 + 급등 위주)
+# 5. 종목 스캔 (급등주 위주 정렬)
 # =========================
 def get_top_coins():
     try:
@@ -144,29 +143,25 @@ def get_top_coins():
         data = []
         for item in all_data:
             if item['market'] == "KRW-BTC": continue
-            data.append({
-                'market': item['market'], 
-                'volume': item['acc_trade_price_24h'],
-                'change_rate': item['signed_change_rate'] 
-            })
+            
+            if item['acc_trade_price_24h'] >= 100000000: 
+                data.append({
+                    'market': item['market'], 
+                    'change_rate': item['signed_change_rate'] 
+                })
 
-        data.sort(key=lambda x: x['volume'], reverse=True)
-        top_50_vol = data[:50]
-
-        top_50_vol.sort(key=lambda x: x['change_rate'], reverse=True)
-        return [x['market'] for x in top_50_vol[:TOP_N]]
+        data.sort(key=lambda x: x['change_rate'], reverse=True)
+        return [x['market'] for x in data[:TOP_N]]
     except: return []
 
 # =========================
-# 6. 💡 투트랙 매수 신호 (로켓 엔진 + 스윙 엔진)
+# 6. 투트랙 매수 신호 (로켓 엔진 + 스윙 엔진)
 # =========================
 def check_buy_signal(ticker):
-    """반환값: (진입여부, 일봉20일선, 진입타입)"""
     try:
-        # --- 🚀 [트랙 1] 로켓 돌파 엔진 (레드스톤 잡기!) ---
+        # --- 🚀 [트랙 1] 로켓 돌파 엔진 ---
         df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=20)
         if df_5m is not None and len(df_5m) >= 15:
-            # 최근 10봉 평균 거래량 대비 3배 이상 폭발 & 1.5% 이상 수직 장대양봉
             vol_avg = df_5m['volume'].iloc[-12:-2].mean()
             cur_vol = df_5m['volume'].iloc[-1]
             cur_close = df_5m['close'].iloc[-1]
@@ -176,13 +171,12 @@ def check_buy_signal(ticker):
             cond_strong_bull = (cur_close - cur_open) / cur_open > 0.015 
             
             if cond_vol_spike and cond_strong_bull:
-                return True, 0, "🚀로켓돌파" # 일봉 무시하고 즉시 탑승!
+                return True, 0, "🚀로켓돌파" 
 
-        # --- 🍀 [트랙 2] 스윙 눌림목 엔진 (기존 안전 장치) ---
+        # --- 🍀 [트랙 2] 스윙 눌림목 엔진 ---
         df_day = pyupbit.get_ohlcv(ticker, interval="day", count=30)
         if df_day is None or len(df_day) < 5: return False, 0, "NONE"
         
-        # 25일 데이터가 없어도 에러 안 내고 현재 있는 데이터로 평균 계산
         if len(df_day) >= 20:
             day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
         else:
@@ -279,10 +273,9 @@ def sell_coin(ticker, reason, current_price, buy_price):
 # 8. 메인 루프
 # =========================
 def main():
-    # 💡 과거 지시사항에 따라 시작 메시지는 항상 고정
     start_msg = "== 업비트 봇 가동 시작 =="
     send_msg(start_msg)
-    send_msg("🚀 V13 투트랙(로켓돌파 + 눌림목 스윙) 엔진 작동 준비 완료!")
+    send_msg("🚀 V13.2 레이더망 초고속 회전 모드 가동! (1분 스캔 적용)")
     
     bot_stats["last_report_time"] = time.time()
     last_top_coins_time = 0
@@ -299,7 +292,8 @@ def main():
             krw = sync_balances()
             blacklist = {k: v for k, v in blacklist.items() if now - v < 3600} 
 
-            if now - last_top_coins_time > 300: 
+            # 💡 5분(300초)에서 1분(60초)으로 스캔 주기 대폭 단축!
+            if now - last_top_coins_time > 60: 
                 top_coins = get_top_coins(); last_top_coins_time = now
 
             holding_tickers = list(positions.keys())
@@ -316,7 +310,6 @@ def main():
                 if current_price > pos['peak_price']: pos['peak_price'] = current_price
                 drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
-                # 일봉 붕괴 판단용
                 df_day = pyupbit.get_ohlcv(ticker, interval="day", count=25)
                 if df_day is not None and len(df_day) >= 20:
                     current_day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
@@ -326,7 +319,6 @@ def main():
                 if profit >= TRAILING_ACTIVATE and drop_from_peak >= TRAILING_DROP:
                     sell_coin(ticker, "💸 [고점 익절]", current_price, buy_price); continue
                 
-                # 로켓으로 잡은 애들은 day_ma20이 0일 수 있으므로 예외 처리
                 if profit < 0 and current_day_ma20 > 0 and current_price < current_day_ma20:
                     sell_coin(ticker, "✂️ [일봉 붕괴 컷]", current_price, buy_price); continue
                     
