@@ -22,15 +22,15 @@ IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 스윙/장기 매매 설정값 (비중 UP, 횟수 DOWN)
+# 2. 스윙/장기 매매 설정값 (💡 조건 완화)
 # =========================
-TOP_N = 10              # 상위 10개 우량/주도 코인만 집중 감시
-MAX_POSITIONS = 3       # 💡 3종목에 30%씩 비중을 크게 실어서 진입!
+TOP_N = 15              # 💡 10개에서 15개로 후보군 확장!
+MAX_POSITIONS = 3       # 3종목에 30%씩 비중을 크게 실어서 진입!
 
-# 동적 매도 설정
-TRAILING_ACTIVATE = 0.05 # 💡 수익이 +5% 이상일 때부터 고점 추적 (작은 수익에 안 팖)
+# 동적 매도 설정 (유지)
+TRAILING_ACTIVATE = 0.05 # 수익이 +5% 이상일 때부터 고점 추적
 TRAILING_DROP = 0.02     # 최고점 대비 -2% 꺾이면 하락 징후로 보고 익절
-HARD_STOP_LOSS = -0.03   # 💡 최후의 보루: -3% 도달 시 어떤 이유든 칼손절 (비중이 크므로 필수)
+HARD_STOP_LOSS = -0.03   # 최후의 보루: -3% 도달 시 어떤 이유든 칼손절
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
@@ -57,7 +57,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V12 스윙 마스터 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V12.1 스윙 완화판 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -83,7 +83,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V12 스윙/장기 에디션 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V12.1 스윙/조건완화 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -128,16 +128,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 차트 분석 지표 (일봉 + 15분봉)
-# =========================
-def get_bollinger_bands(df, window=20, num_std=2):
-    rolling_mean = df['close'].rolling(window=window).mean()
-    rolling_std = df['close'].rolling(window=window).std()
-    lower_band = rolling_mean - (rolling_std * num_std)
-    return lower_band
-
-# =========================
-# 6. 종목 스캔 & 💡 일봉+15분봉 복합 분석 매수 신호
+# 5. 종목 스캔 & 💡 매수 신호 (조건 완화 적용)
 # =========================
 def get_top_coins():
     try:
@@ -164,32 +155,31 @@ def check_buy_signal(ticker):
     반환값: (진입 여부, 일봉 20일선 가격)
     """
     try:
-        # 💡 1. 일봉 분석 (큰 추세 확인)
+        # 1. 일봉 분석 (큰 추세 확인 - 유지)
         df_day = pyupbit.get_ohlcv(ticker, interval="day", count=30)
         if df_day is None or len(df_day) < 25: return False, 0
         
         day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
         day_close = df_day['close'].iloc[-1]
         
-        # 큰 추세가 하락(일봉 20일선 아래)이면 아예 쳐다보지 않음
         if day_close < day_ma20:
             return False, 0
             
-        time.sleep(0.1) # API 보호
+        time.sleep(0.1) 
         
-        # 💡 2. 15분봉 분석 (눌림목 타점 잡기)
-        df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=40)
-        if df_15m is None or len(df_15m) < 30: return False, 0
+        # 💡 2. 15분봉 분석 (눌림목 기준 완화!)
+        df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=30)
+        if df_15m is None or len(df_15m) < 25: return False, 0
         
-        df_15m['lower_band'] = get_bollinger_bands(df_15m)
+        df_15m['ma20'] = df_15m['close'].rolling(20).mean()
+        
         cur_close = df_15m['close'].iloc[-1]
         cur_open = df_15m['open'].iloc[-1]
         cur_low = df_15m['low'].iloc[-1]
+        ma20_15m = df_15m['ma20'].iloc[-1]
         
-        lower_band = df_15m['lower_band'].iloc[-1]
-        
-        # 조건: 15분봉 밴드 하단을 터치(눌림)했고, 현재 양봉으로 전환 중일 때 진입
-        is_dipped = cur_low <= lower_band
+        # 💡 극단적 하단 터치 대신, 15분봉 20일선 부근(0.5% 위아래)으로 내려오면 눌림목 인정
+        is_dipped = cur_low <= (ma20_15m * 1.005) 
         is_bouncing = cur_close > cur_open
         
         if is_dipped and is_bouncing:
@@ -199,7 +189,7 @@ def check_buy_signal(ticker):
     except: return False, 0
 
 # =========================
-# 7. 장부 관리 및 실행 
+# 6. 장부 관리 및 실행 
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -222,7 +212,6 @@ def sync_balances():
         if buy_amount >= 5000:
             active_tickers.append(ticker)
             if ticker not in positions:
-                # 봇 재시작 대비 임시값 할당 (루프에서 갱신됨)
                 positions[ticker] = {
                     'buy_price': avg_price,
                     'peak_price': avg_price,
@@ -247,7 +236,7 @@ def buy_coin(ticker, krw, day_ma20):
             'day_ma20': day_ma20
         }
         
-        send_msg(f"🎯 [비중 30% 진입] {ticker}\n(일봉 우상향 중 15분봉 눌림목 포착!)")
+        send_msg(f"🎯 [비중 30% 진입] {ticker}\n(일봉 상승 확인 + 15분봉 유연한 눌림목 포착!)")
     except Exception as e: pass
 
 def sell_coin(ticker, reason, current_price, buy_price):
@@ -269,11 +258,11 @@ def sell_coin(ticker, reason, current_price, buy_price):
     except Exception as e: pass
 
 # =========================
-# 8. 메인 루프 (💡 동적 대응 시나리오 적용)
+# 7. 메인 루프 (시나리오 기반 스윙 매매)
 # =========================
 def main():
-    start_msg = f"🚀 V12 스윙 마스터 전략 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 잔파도 무시! 30% 비중으로 큰 추세를 먹고, 하락 전환 시 끊어냅니다."
+    start_msg = f"🚀 V12.1 스윙 완화판 가동! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 너무 깐깐했던 15분봉 조건을 현실적인 눌림목으로 러프하게 풀었습니다."
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -291,19 +280,18 @@ def main():
                 bot_stats["last_report_time"] = now
 
             krw = sync_balances()
-            blacklist = {k: v for k, v in blacklist.items() if now - v < 3600} # 손절 시 1시간 관망
+            blacklist = {k: v for k, v in blacklist.items() if now - v < 3600} 
 
-            if now - last_top_coins_time > 300: # 5분마다 종목 갱신
+            if now - last_top_coins_time > 300: 
                 top_coins = get_top_coins()
                 last_top_coins_time = now
 
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 💡 시나리오 기반 동적 매도 로직
+            # 시나리오 기반 동적 매도 로직
             # ======================
             for ticker in holding_tickers:
-                # 현재가 확인
                 current_price = pyupbit.get_current_price(ticker)
                 if current_price is None: continue
                 
@@ -311,16 +299,14 @@ def main():
                 buy_price = pos['buy_price']
                 profit = (current_price - buy_price) / buy_price
                 
-                # 최고가 갱신
                 if current_price > pos['peak_price']: pos['peak_price'] = current_price
                 drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
-                # 일봉 추세 실시간 확인 (시나리오 2, 3 판별용)
                 df_day = pyupbit.get_ohlcv(ticker, interval="day", count=25)
                 if df_day is not None and len(df_day) >= 20:
                     current_day_ma20 = df_day['close'].rolling(20).mean().iloc[-1]
                 else:
-                    current_day_ma20 = pos['day_ma20'] # API 실패 시 기존 값 유지
+                    current_day_ma20 = pos['day_ma20'] 
 
                 # [시나리오 1] 장기 상승 오버슈팅 (수익 극대화 후 하락 예측 시 매도)
                 if profit >= TRAILING_ACTIVATE:
@@ -330,7 +316,6 @@ def main():
                 
                 # [시나리오 3] 분석 결과 지속 하락 예측 (일봉 추세선 붕괴)
                 if profit < 0 and current_price < current_day_ma20:
-                    # 일봉 20일선이 깨지면 더 볼 것 없이 컷!
                     sell_coin(ticker, "✂️ [일봉 추세 붕괴 빠른 컷]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
@@ -340,14 +325,11 @@ def main():
                     sell_coin(ticker, "☠️ [-3% 방어선 칼손절]", current_price, buy_price)
                     blacklist[ticker] = now
                     continue
-                    
-                # 그 외의 경우(수익이 나고 있거나, -1~2% 하락 중이지만 일봉 추세가 살아있을 때)는 
-                # 흔들기에 당하지 않고 지속 HOLD!
 
                 time.sleep(0.2)
 
             # ======================
-            # 💡 비중 UP 스윙 매수 로직
+            # 💡 비중 UP 스윙 매수 로직 (유연해진 그물망)
             # ======================
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
@@ -356,7 +338,6 @@ def main():
                 is_buy, day_ma20 = check_buy_signal(ticker)
                 
                 if is_buy:
-                    # 💡 비중 30% 할당 (선택과 집중)
                     buy_amount = max(krw * 0.30, MIN_ORDER)
                     
                     if krw >= (buy_amount * FEE_RATE) and buy_amount >= MIN_ORDER:
