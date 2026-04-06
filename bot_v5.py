@@ -21,12 +21,12 @@ IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 🍀 럭키세븐 스윙 설정값 (수정됨)
+# 2. 🍀 럭키세븐 스윙 설정값
 # =========================
-TOP_N = 20              # 💡 감시 종목을 20개로 확대
-MAX_POSITIONS = 7       # 💡 최대 보유 종목 7개 (럭키세븐!)
+TOP_N = 20              # 감시 종목 20개
+MAX_POSITIONS = 7       # 최대 보유 종목 7개 
 
-# 매도 시나리오 (유지)
+# 매도 시나리오 (장기/스윙)
 TRAILING_ACTIVATE = 0.05 
 TRAILING_DROP = 0.02     
 HARD_STOP_LOSS = -0.03   
@@ -56,7 +56,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V12.2 럭키세븐 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V12.3 상승률 주도주 에디션 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -82,7 +82,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V12.2 🍀럭키세븐 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V12.3 상승률 주도주 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -127,7 +127,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 💡 매수 신호 (더 유연해진 공중부양 눌림목)
+# 5. 💡 하이브리드 종목 스캔 (거래대금 + 전일대비 상승폭)
 # =========================
 def get_top_coins():
     try:
@@ -143,15 +143,27 @@ def get_top_coins():
         data = []
         for item in all_data:
             if item['market'] == "KRW-BTC": continue
-            data.append((item['market'], item['acc_trade_price_24h']))
+            data.append({
+                'market': item['market'], 
+                'volume': item['acc_trade_price_24h'],
+                'change_rate': item['signed_change_rate'] # 전일 대비 등락률
+            })
 
-        data.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in data[:TOP_N]]
+        # 💡 1차 방패: 거래대금 상위 50위까지만 추림 (잡코인 설거지 원천 차단)
+        data.sort(key=lambda x: x['volume'], reverse=True)
+        top_50_vol = data[:50]
+
+        # 💡 2차 창: 그 안전한 50개 중에서 '상승률'이 가장 높은 순으로 재정렬!
+        top_50_vol.sort(key=lambda x: x['change_rate'], reverse=True)
+        
+        return [x['market'] for x in top_50_vol[:TOP_N]]
     except: return []
 
+# =========================
+# 6. 매수 신호 (일봉 + 15분봉 유연한 눌림목)
+# =========================
 def check_buy_signal(ticker):
     try:
-        # 1. 일봉 분석 (생명선 필터)
         df_day = pyupbit.get_ohlcv(ticker, interval="day", count=30)
         if df_day is None or len(df_day) < 25: return False, 0
         
@@ -160,7 +172,6 @@ def check_buy_signal(ticker):
         
         if day_close < day_ma20: return False, 0
             
-        # 2. 15분봉 분석 (💡 눌림목 기준 대폭 완화)
         df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=30)
         if df_15m is None or len(df_15m) < 25: return False, 0
         
@@ -171,7 +182,6 @@ def check_buy_signal(ticker):
         cur_low = df_15m['low'].iloc[-1]
         ma20_15m = df_15m['ma20'].iloc[-1]
         
-        # 💡 20일선 근처(상단 1.2% 오차)까지 내려오면 매수 인정! (더 자주 잡힘)
         is_dipped = cur_low <= (ma20_15m * 1.012) 
         is_bouncing = cur_close > cur_open
         
@@ -182,7 +192,7 @@ def check_buy_signal(ticker):
     except: return False, 0
 
 # =========================
-# 6. 장부 및 매매 실행
+# 7. 장부 및 매매 실행
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -223,7 +233,7 @@ def buy_coin(ticker, krw_unit, day_ma20):
             'day_ma20': day_ma20
         }
         
-        send_msg(f"🍀 [럭키세븐 진입] {ticker}\n(추세 좋음! 얕은 눌림목에서 채갑니다!)")
+        send_msg(f"🔥 [급등 주도주 탑승] {ticker}\n(거래대금+상승률 상위! 얕은 눌림목 포착)")
     except Exception as e: pass
 
 def sell_coin(ticker, reason, current_price, buy_price):
@@ -244,11 +254,11 @@ def sell_coin(ticker, reason, current_price, buy_price):
     except Exception as e: pass
 
 # =========================
-# 7. 메인 루프 (럭키세븐 전개)
+# 8. 메인 루프
 # =========================
 def main():
-    start_msg = f"🚀 V12.2 럭키세븐 에디션 출격! ({get_kst().strftime('%m/%d %H:%M')})\n"
-    start_msg += f"✅ 보유 종목 7개로 확장! 얕은 눌림목도 놓치지 않고 낚아챕니다."
+    start_msg = f"🚀 V12.3 상승률 주도주 에디션 출격! ({get_kst().strftime('%m/%d %H:%M')})\n"
+    start_msg += f"✅ 잡코인 차단! 우량주 중에서 전일대비 가장 많이 쏘는 놈만 찾아 올라탑니다."
     send_msg(start_msg)
     
     bot_stats["last_report_time"] = time.time()
@@ -271,7 +281,7 @@ def main():
 
             holding_tickers = list(positions.keys())
             
-            # 매도 로직 (시나리오별 대응)
+            # 매도 로직 
             for ticker in holding_tickers:
                 current_price = pyupbit.get_current_price(ticker)
                 if current_price is None: continue
@@ -297,14 +307,13 @@ def main():
 
                 time.sleep(0.1)
 
-            # 💡 럭키세븐 매수 (비중 약 14%)
+            # 럭키세븐 주도주 매수
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
                 if len(positions) >= MAX_POSITIONS: break
 
                 is_buy, day_ma20 = check_buy_signal(ticker)
                 if is_buy:
-                    # 7개 종목을 담기 위해 원화 잔고의 약 14%씩 매수
                     buy_unit = max(krw * 0.14, MIN_ORDER)
                     if krw >= (buy_unit * FEE_RATE) and buy_unit >= MIN_ORDER:
                         buy_coin(ticker, buy_unit, day_ma20)
