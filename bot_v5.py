@@ -16,19 +16,20 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
+# 고정된 ImageMagick 경로 
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. V15.1 행동대장 단타 설정값
+# 2. V16 상승장 파도타기 설정값
 # =========================
 TOP_N = 20              
 MAX_POSITIONS = 7       
 
-# 짧고 빠른 손익비 (1.5% 룰)
-TAKE_PROFIT = 0.015      
-STOP_LOSS = -0.015       
+# 짧고 빠른 손익비 
+TAKE_PROFIT = 0.02       # +2.0% 익절 (상승장이니 수익은 조금 더 길게)
+HARD_STOP_LOSS = -0.015  # -1.5% 절대 방어선 (하지만 추세 꺾이면 이전에 먼저 팝니다)
 
 # ⏰ 타임 컷 설정
 STAGNANT_SEC = 2700      # 45분 횡보 시 무조건 탈출
@@ -58,7 +59,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V15.1 행동대장 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V16 상승장 파도타기 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -84,7 +85,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V15.1 행동대장 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V16 상승장 파도타기 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -165,39 +166,44 @@ def ta_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 # =========================
-# 6. 매수 신호 (💡 논리적 오류 완벽 수정!)
+# 6. 매수 신호 (💡 상승장 유연한 탑승 로직)
 # =========================
 def check_buy_signal(ticker):
     try:
-        df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
+        df = pyupbit.get_ohlcv(ticker, interval="minute5", count=80)
         time.sleep(0.05) 
         
-        if df_5m is None or len(df_5m) < 20: return False, "NONE"
+        if df is None or len(df) < 65: return False, "NONE"
         
-        df_5m['rsi'] = ta_rsi(df_5m['close'])
+        df['ma5'] = df['close'].rolling(5).mean()
+        df['ma20'] = df['close'].rolling(20).mean()
+        df['ma60'] = df['close'].rolling(60).mean()
+        df['rsi'] = ta_rsi(df['close'])
         
-        cur_close = df_5m['close'].iloc[-1]
-        cur_open = df_5m['open'].iloc[-1]
+        ma5 = df['ma5'].iloc[-1]
+        ma20 = df['ma20'].iloc[-1]
+        ma60 = df['ma60'].iloc[-1]
+        rsi = df['rsi'].iloc[-1]
         
-        # 💡 핵심 수정: 미완성 캔들이 아니라, 직전 '완성된 캔들' 데이터 사용
-        prev_close = df_5m['close'].iloc[-2]
-        prev_open = df_5m['open'].iloc[-2]
-        prev_vol = df_5m['volume'].iloc[-2]
+        cur_close = df['close'].iloc[-1]
+        cur_open = df['open'].iloc[-1]
+        cur_low = df['low'].iloc[-1]
         
-        old_vol = df_5m['volume'].iloc[-3]
-        prev_rsi = df_5m['rsi'].iloc[-2]
+        # 💡 전제조건: 상승장 판단 (5분봉 기준 20일선이 60일선 위에 있어야 함)
+        is_uptrend = ma20 > ma60
+        if not is_uptrend: return False, "NONE"
         
-        # 🚀 [패턴 1] 미니 로켓: 직전 완성된 캔들의 거래량이 1.5배 증가 & 양봉이었고, 현재도 가격이 안 빠지고 오르는 중일 때!
-        cond_mini_rocket = (prev_vol > old_vol * 1.5) and ((prev_close - prev_open) / prev_open >= 0.005) and (cur_close >= prev_close)
+        # 🚀 [패턴 1] 추세 탑승: 정배열(5일선>20일선) 속에서 양봉이며 과열(RSI 70)이 아닐 때 쉽게 탑승!
+        cond_riding = (ma5 > ma20) and (cur_close > cur_open) and (cur_close > ma5) and (rsi < 70)
         
-        if cond_mini_rocket:
-            return True, "🚀미니로켓"
+        if cond_riding:
+            return True, "🚀추세탑승"
             
-        # 🍀 [패턴 2] 5분봉 과매도 반등: 직전 캔들에서 RSI 35를 찍고, 현재 양봉으로 말아 올리는 중일 때!
-        cond_oversold_bounce = (prev_rsi < 35) and (cur_close > cur_open)
+        # 🍀 [패턴 2] 상승 눌림목: 상승장 속에서 20일선 근처로 얕게 떨어졌다 반등할 때!
+        cond_dip = (cur_low <= ma20 * 1.005) and (cur_close > cur_open) and (rsi < 60)
         
-        if cond_oversold_bounce:
-            return True, "🍀바닥반등"
+        if cond_dip:
+            return True, "🍀상승눌림"
 
         return False, "NONE"
     except: return False, "NONE"
@@ -270,7 +276,7 @@ def sell_coin(ticker, reason, current_price, buy_price):
 def main():
     start_msg = "== 업비트 봇 가동 시작 =="
     send_msg(start_msg)
-    send_msg("🚀 V15.1 거래량 비교 버그 완벽 수정! 진정한 행동대장이 출격합니다.")
+    send_msg("🚀 V16 상승장 파도타기 에디션! 잦은 매매와 하락 전환 시 즉각 컷 아웃 로직을 가동합니다.")
     
     bot_stats["last_report_time"] = time.time()
     last_top_coins_time = 0
@@ -292,7 +298,9 @@ def main():
 
             holding_tickers = list(positions.keys())
             
-            # ⚡ 빛의 속도 매도 로직
+            # ======================
+            # ⚡ 스마트 매도 및 하락장 방어 로직
+            # ======================
             for ticker in holding_tickers:
                 current_price = pyupbit.get_current_price(ticker)
                 if current_price is None: continue
@@ -302,16 +310,25 @@ def main():
                 held_time = now - pos.get('buy_time', now)
                 profit = (current_price - buy_price) / buy_price
 
-                # 1. +1.5% 즉각 익절
+                # 1. 상승장 목표 익절 (+2.0%)
                 if profit >= TAKE_PROFIT:
-                    sell_coin(ticker, "🎯 [단타 +1.5% 즉각 익절]", current_price, buy_price); continue
+                    sell_coin(ticker, "🎯 [상승장 파도타기 익절]", current_price, buy_price); continue
+
+                # 2. 💡 [핵심 방어] 하락장 전환 감시 (5분봉 20일선 이탈 시 미련없이 컷!)
+                df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=25)
+                if df_5m is not None and len(df_5m) >= 20:
+                    ma20_cur = df_5m['close'].rolling(20).mean().iloc[-1]
+                    if profit < 0 and current_price < ma20_cur:
+                        sell_coin(ticker, "✂️ [추세 꺾임 빠른 컷! 손실최소화]", current_price, buy_price)
+                        blacklist[ticker] = now
+                        continue
                 
-                # 2. -1.5% 칼손절
-                if profit <= STOP_LOSS:
-                    sell_coin(ticker, "☠️ [-1.5% 단타 칼손절]", current_price, buy_price); continue
+                # 3. 절대 방어선 칼손절 (-1.5%) - 급락 시 최후의 보루
+                if profit <= HARD_STOP_LOSS:
+                    sell_coin(ticker, "☠️ [-1.5% 급락 절대 손절]", current_price, buy_price); continue
                     blacklist[ticker] = now
 
-                # 3. 45분 타임 컷
+                # 4. 45분 타임 컷
                 if held_time >= STAGNANT_SEC:
                     if profit > 0:
                         sell_coin(ticker, "🥱 [45분 횡보 약수익 탈출]", current_price, buy_price); continue
