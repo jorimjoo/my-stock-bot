@@ -21,14 +21,14 @@ IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. V15 행동대장 단타 설정값
+# 2. V15.1 행동대장 단타 설정값
 # =========================
 TOP_N = 20              
 MAX_POSITIONS = 7       
 
 # 짧고 빠른 손익비 (1.5% 룰)
-TAKE_PROFIT = 0.015      # +1.5% 즉각 익절
-STOP_LOSS = -0.015       # -1.5% 즉각 손절
+TAKE_PROFIT = 0.015      
+STOP_LOSS = -0.015       
 
 # ⏰ 타임 컷 설정
 STAGNANT_SEC = 2700      # 45분 횡보 시 무조건 탈출
@@ -58,7 +58,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V15 행동대장 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V15.1 행동대장 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -84,7 +84,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V15 행동대장 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V15.1 행동대장 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -151,7 +151,6 @@ def get_top_coins():
                     'volume': item['acc_trade_price_24h']
                 })
 
-        # 활발한 단타를 위해 거래대금 순으로 직관적 정렬
         data.sort(key=lambda x: x['volume'], reverse=True)
         return [x['market'] for x in data[:TOP_N]]
     except: return []
@@ -166,7 +165,7 @@ def ta_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 # =========================
-# 6. 매수 신호 (5분봉 무한 폭격 로직)
+# 6. 매수 신호 (💡 논리적 오류 완벽 수정!)
 # =========================
 def check_buy_signal(ticker):
     try:
@@ -179,19 +178,23 @@ def check_buy_signal(ticker):
         
         cur_close = df_5m['close'].iloc[-1]
         cur_open = df_5m['open'].iloc[-1]
-        cur_vol = df_5m['volume'].iloc[-1]
+        
+        # 💡 핵심 수정: 미완성 캔들이 아니라, 직전 '완성된 캔들' 데이터 사용
+        prev_close = df_5m['close'].iloc[-2]
+        prev_open = df_5m['open'].iloc[-2]
         prev_vol = df_5m['volume'].iloc[-2]
         
-        rsi_val = df_5m['rsi'].iloc[-1]
+        old_vol = df_5m['volume'].iloc[-3]
+        prev_rsi = df_5m['rsi'].iloc[-2]
         
-        # 🚀 [패턴 1] 미니 로켓: 거래량이 직전 대비 1.5배 증가 & 0.5% 이상 양봉
-        cond_mini_rocket = (cur_vol > prev_vol * 1.5) and ((cur_close - cur_open) / cur_open >= 0.005)
+        # 🚀 [패턴 1] 미니 로켓: 직전 완성된 캔들의 거래량이 1.5배 증가 & 양봉이었고, 현재도 가격이 안 빠지고 오르는 중일 때!
+        cond_mini_rocket = (prev_vol > old_vol * 1.5) and ((prev_close - prev_open) / prev_open >= 0.005) and (cur_close >= prev_close)
         
         if cond_mini_rocket:
             return True, "🚀미니로켓"
             
-        # 🍀 [패턴 2] 5분봉 과매도 반등: RSI 35 이하 진입 후 양봉 전환
-        cond_oversold_bounce = (rsi_val < 35) and (cur_close > cur_open)
+        # 🍀 [패턴 2] 5분봉 과매도 반등: 직전 캔들에서 RSI 35를 찍고, 현재 양봉으로 말아 올리는 중일 때!
+        cond_oversold_bounce = (prev_rsi < 35) and (cur_close > cur_open)
         
         if cond_oversold_bounce:
             return True, "🍀바닥반등"
@@ -267,7 +270,7 @@ def sell_coin(ticker, reason, current_price, buy_price):
 def main():
     start_msg = "== 업비트 봇 가동 시작 =="
     send_msg(start_msg)
-    send_msg("🚀 V15 행동대장 단타 모드! 지루한 차트 분석을 버리고 수급에 즉각 반응합니다.")
+    send_msg("🚀 V15.1 거래량 비교 버그 완벽 수정! 진정한 행동대장이 출격합니다.")
     
     bot_stats["last_report_time"] = time.time()
     last_top_coins_time = 0
@@ -282,16 +285,14 @@ def main():
                 send_system_briefing(); bot_stats["last_report_time"] = now
 
             krw = sync_balances()
-            blacklist = {k: v for k, v in blacklist.items() if now - v < 1800} # 회전율을 위해 블랙리스트 시간 단축(30분)
+            blacklist = {k: v for k, v in blacklist.items() if now - v < 1800} 
 
             if now - last_top_coins_time > 60: 
                 top_coins = get_top_coins(); last_top_coins_time = now
 
             holding_tickers = list(positions.keys())
             
-            # ======================
             # ⚡ 빛의 속도 매도 로직
-            # ======================
             for ticker in holding_tickers:
                 current_price = pyupbit.get_current_price(ticker)
                 if current_price is None: continue
@@ -310,7 +311,7 @@ def main():
                     sell_coin(ticker, "☠️ [-1.5% 단타 칼손절]", current_price, buy_price); continue
                     blacklist[ticker] = now
 
-                # 3. 45분 타임 컷 (지루한 횡보 방지)
+                # 3. 45분 타임 컷
                 if held_time >= STAGNANT_SEC:
                     if profit > 0:
                         sell_coin(ticker, "🥱 [45분 횡보 약수익 탈출]", current_price, buy_price); continue
@@ -326,7 +327,7 @@ def main():
 
                 is_buy, buy_type = check_buy_signal(ticker)
                 if is_buy:
-                    buy_unit = max(krw * 0.14, MIN_ORDER) # 시드의 약 14% 비중
+                    buy_unit = max(krw * 0.14, MIN_ORDER) 
                     if krw >= (buy_unit * FEE_RATE) and buy_unit >= MIN_ORDER:
                         buy_coin(ticker, buy_unit, buy_type)
                         krw -= (buy_unit * FEE_RATE)
