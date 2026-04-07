@@ -16,29 +16,22 @@ SECRET_KEY = "y9XT6Q6CyEOp4RxG8FxYbmcwxKx4Uf0BBypwxxcP"
 TELEGRAM_TOKEN = "8726756800:AAFyCDAQSXeYBjesH-Dxs-tnyFOnAhN4Uz0"
 TELEGRAM_CHAT_ID = "8403406400"
 
-# 시스템 경로 유지
 IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 럭키세븐 스윙 & 로켓 설정값 (💡 손실 최소화 극대화)
+# 2. V15 행동대장 단타 설정값
 # =========================
 TOP_N = 20              
 MAX_POSITIONS = 7       
 
-# 🍀 스윙 매도 시나리오
-TRAILING_ACTIVATE = 0.05 
-TRAILING_DROP = 0.02     
-HARD_STOP_LOSS = -0.02   # 💡 절대 방어선 강화 (-3% -> -2%)
-
-# 🚀 로켓 매도 시나리오
-ROCKET_ACTIVATE = 0.03
-ROCKET_DROP = 0.01
+# 짧고 빠른 손익비 (1.5% 룰)
+TAKE_PROFIT = 0.015      # +1.5% 즉각 익절
+STOP_LOSS = -0.015       # -1.5% 즉각 손절
 
 # ⏰ 타임 컷 설정
-STAGNANT_SEC = 3600      # 1시간 횡보 시 무조건 탈출
-ROCKET_ABORT_SEC = 1800  # 💡 로켓 매수 후 30분 불발 시 탈출
+STAGNANT_SEC = 2700      # 45분 횡보 시 무조건 탈출
 
 MIN_ORDER = 6000        
 FEE_RATE = 1.0005       
@@ -65,7 +58,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V14.1 철벽 방어 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V15 행동대장 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -91,7 +84,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V14.1 철벽 방어 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V15 행동대장 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -136,7 +129,7 @@ def telegram_polling():
         time.sleep(2)
 
 # =========================
-# 5. 종목 스캔 (상승률 랭킹)
+# 5. 종목 스캔 (거래대금 순)
 # =========================
 def get_top_coins():
     try:
@@ -155,55 +148,54 @@ def get_top_coins():
             if item['acc_trade_price_24h'] >= 100000000: 
                 data.append({
                     'market': item['market'], 
-                    'change_rate': item['signed_change_rate'] 
+                    'volume': item['acc_trade_price_24h']
                 })
 
-        data.sort(key=lambda x: x['change_rate'], reverse=True)
+        # 활발한 단타를 위해 거래대금 순으로 직관적 정렬
+        data.sort(key=lambda x: x['volume'], reverse=True)
         return [x['market'] for x in data[:TOP_N]]
     except: return []
 
+def ta_rsi(series, period=14):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=period-1, adjust=False).mean()
+    ema_down = down.ewm(com=period-1, adjust=False).mean()
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
+
 # =========================
-# 6. 투트랙 매수 신호
+# 6. 매수 신호 (5분봉 무한 폭격 로직)
 # =========================
 def check_buy_signal(ticker):
     try:
-        # --- 🚀 [트랙 1] 로켓 돌파 엔진 ---
-        df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=20)
+        df_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=30)
         time.sleep(0.05) 
         
-        if df_5m is not None and len(df_5m) >= 15:
-            vol_avg = df_5m['volume'].iloc[-12:-2].mean()
-            cur_vol = df_5m['volume'].iloc[-1]
-            cur_close = df_5m['close'].iloc[-1]
-            cur_open = df_5m['open'].iloc[-1]
+        if df_5m is None or len(df_5m) < 20: return False, "NONE"
+        
+        df_5m['rsi'] = ta_rsi(df_5m['close'])
+        
+        cur_close = df_5m['close'].iloc[-1]
+        cur_open = df_5m['open'].iloc[-1]
+        cur_vol = df_5m['volume'].iloc[-1]
+        prev_vol = df_5m['volume'].iloc[-2]
+        
+        rsi_val = df_5m['rsi'].iloc[-1]
+        
+        # 🚀 [패턴 1] 미니 로켓: 거래량이 직전 대비 1.5배 증가 & 0.5% 이상 양봉
+        cond_mini_rocket = (cur_vol > prev_vol * 1.5) and ((cur_close - cur_open) / cur_open >= 0.005)
+        
+        if cond_mini_rocket:
+            return True, "🚀미니로켓"
             
-            cond_vol_spike = cur_vol > (vol_avg * 2.0)
-            cond_strong_bull = (cur_close - cur_open) / cur_open >= 0.01 
-            
-            if cond_vol_spike and cond_strong_bull:
-                return True, "🚀로켓돌파" 
+        # 🍀 [패턴 2] 5분봉 과매도 반등: RSI 35 이하 진입 후 양봉 전환
+        cond_oversold_bounce = (rsi_val < 35) and (cur_close > cur_open)
+        
+        if cond_oversold_bounce:
+            return True, "🍀바닥반등"
 
-        # --- 🍀 [트랙 2] 스윙 눌림목 엔진 ---
-        df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=65)
-        time.sleep(0.05)
-        
-        if df_15m is None or len(df_15m) < 60: return False, "NONE"
-        
-        ma60_15m = df_15m['close'].rolling(60).mean().iloc[-1]
-        ma20_15m = df_15m['close'].rolling(20).mean().iloc[-1]
-        
-        cur_close_15 = df_15m['close'].iloc[-1]
-        cur_open_15 = df_15m['open'].iloc[-1]
-        cur_low_15 = df_15m['low'].iloc[-1]
-        
-        if cur_close_15 < ma60_15m: return False, "NONE"
-        
-        is_dipped = cur_low_15 <= (ma20_15m * 1.015) 
-        is_bouncing = cur_close_15 > cur_open_15
-        
-        if is_dipped and is_bouncing:
-            return True, "🍀눌림목"
-            
         return False, "NONE"
     except: return False, "NONE"
 
@@ -229,7 +221,7 @@ def sync_balances():
         if amt * avg_price >= 5000:
             active_tickers.append(ticker)
             if ticker not in positions:
-                positions[ticker] = {'buy_price': avg_price, 'peak_price': avg_price, 'buy_type': "🍀눌림목", 'buy_time': time.time()}
+                positions[ticker] = {'buy_price': avg_price, 'buy_type': "수동/외부", 'buy_time': time.time()}
                 
     for t in list(positions.keys()):
         if t not in active_tickers:
@@ -245,15 +237,11 @@ def buy_coin(ticker, krw_unit, buy_type):
         current_price = pyupbit.get_current_price(ticker)
         positions[ticker] = {
             'buy_price': current_price,
-            'peak_price': current_price,
             'buy_type': buy_type,
             'buy_time': time.time()
         }
         
-        if buy_type == "🚀로켓돌파":
-            send_msg(f"🔥 [{buy_type} 탑승] {ticker}\n(수직 상승 따라붙습니다!)")
-        else:
-            send_msg(f"✅ [{buy_type} 스윙] {ticker}\n(단기 트렌드 눌림목 포착)")
+        send_msg(f"🔥 [{buy_type} 포착] {ticker} 즉시 탑승!")
     except Exception as e: pass
 
 def sell_coin(ticker, reason, current_price, buy_price):
@@ -279,7 +267,7 @@ def sell_coin(ticker, reason, current_price, buy_price):
 def main():
     start_msg = "== 업비트 봇 가동 시작 =="
     send_msg(start_msg)
-    send_msg("🚀 V14.1 철벽 방어 에디션! 3중 손실 최소화 로직이 가동됩니다.")
+    send_msg("🚀 V15 행동대장 단타 모드! 지루한 차트 분석을 버리고 수급에 즉각 반응합니다.")
     
     bot_stats["last_report_time"] = time.time()
     last_top_coins_time = 0
@@ -294,7 +282,7 @@ def main():
                 send_system_briefing(); bot_stats["last_report_time"] = now
 
             krw = sync_balances()
-            blacklist = {k: v for k, v in blacklist.items() if now - v < 3600} 
+            blacklist = {k: v for k, v in blacklist.items() if now - v < 1800} # 회전율을 위해 블랙리스트 시간 단축(30분)
 
             if now - last_top_coins_time > 60: 
                 top_coins = get_top_coins(); last_top_coins_time = now
@@ -302,7 +290,7 @@ def main():
             holding_tickers = list(positions.keys())
             
             # ======================
-            # 💡 철벽 방어 매도 로직
+            # ⚡ 빛의 속도 매도 로직
             # ======================
             for ticker in holding_tickers:
                 current_price = pyupbit.get_current_price(ticker)
@@ -310,46 +298,28 @@ def main():
                 
                 pos = positions[ticker]
                 buy_price = pos['buy_price']
-                buy_type = pos['buy_type']
                 held_time = now - pos.get('buy_time', now)
                 profit = (current_price - buy_price) / buy_price
-                
-                if current_price > pos['peak_price']: pos['peak_price'] = current_price
-                drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
-                # 1. 고점 익절 감시
-                if buy_type == "🚀로켓돌파":
-                    if profit >= ROCKET_ACTIVATE and drop_from_peak >= ROCKET_DROP:
-                        sell_coin(ticker, "💸 [로켓 수직낙하 컷]", current_price, buy_price); continue
-                else:
-                    if profit >= TRAILING_ACTIVATE and drop_from_peak >= TRAILING_DROP:
-                        sell_coin(ticker, "💸 [스윙 고점 익절]", current_price, buy_price); continue
+                # 1. +1.5% 즉각 익절
+                if profit >= TAKE_PROFIT:
+                    sell_coin(ticker, "🎯 [단타 +1.5% 즉각 익절]", current_price, buy_price); continue
                 
-                # 2. 💡 타임 컷 (불발탄 및 횡보 방어)
-                if buy_type == "🚀로켓돌파" and held_time >= ROCKET_ABORT_SEC and profit <= 0:
-                    sell_coin(ticker, "⏰ [로켓 불발 30분 컷]", current_price, buy_price); continue
-                    
+                # 2. -1.5% 칼손절
+                if profit <= STOP_LOSS:
+                    sell_coin(ticker, "☠️ [-1.5% 단타 칼손절]", current_price, buy_price); continue
+                    blacklist[ticker] = now
+
+                # 3. 45분 타임 컷 (지루한 횡보 방지)
                 if held_time >= STAGNANT_SEC:
                     if profit > 0:
-                        sell_coin(ticker, "🥱 [1시간 횡보 약수익 탈출]", current_price, buy_price); continue
+                        sell_coin(ticker, "🥱 [45분 횡보 약수익 탈출]", current_price, buy_price); continue
                     else:
-                        sell_coin(ticker, "⏰ [1시간 횡보 타임컷 손절]", current_price, buy_price); continue
-
-                # 3. 💡 단기 추세 붕괴 감시 (15분봉 60선 이탈)
-                df_15m = pyupbit.get_ohlcv(ticker, interval="minute15", count=65)
-                time.sleep(0.05)
-                if df_15m is not None and len(df_15m) >= 60:
-                    trend_ma = df_15m['close'].rolling(60).mean().iloc[-1]
-                    if profit < 0 and current_price < trend_ma:
-                        sell_coin(ticker, "✂️ [단기 추세 붕괴 컷]", current_price, buy_price); continue
-                    
-                # 4. 💡 최후의 보루 절대 손절 (가장 강력한 방패)
-                if profit <= HARD_STOP_LOSS:
-                    sell_coin(ticker, "☠️ [-2% 철벽 방어선 손절]", current_price, buy_price); continue
+                        sell_coin(ticker, "⏰ [45분 횡보 강제 컷]", current_price, buy_price); continue
 
                 time.sleep(0.1)
 
-            # 투트랙 매수
+            # ⚡ 빠른 매수
             for ticker in top_coins:
                 if ticker in positions or ticker in blacklist: continue
                 if len(positions) >= MAX_POSITIONS: break
@@ -363,7 +333,7 @@ def main():
                         time.sleep(0.5)
                 time.sleep(0.1) 
 
-            time.sleep(3)
+            time.sleep(2)
         except Exception as e:
             time.sleep(5)
 
