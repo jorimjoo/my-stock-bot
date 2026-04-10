@@ -19,7 +19,7 @@ TELEGRAM_CHAT_ID = "8403406400"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. 전략 설정 (V17)
+# 2. 전략 설정 (V17.1 최적화)
 # =========================
 TOP_N = 25
 MAX_POSITIONS = 5
@@ -47,24 +47,32 @@ def send_msg(msg):
         pass
 
 # =========================
-# 4. 거래량 TOP 코인
+# 4. 거래량 TOP 코인 (💡 API 과부하 완벽 해결!)
 # =========================
 def get_top_coins():
     try:
         tickers = pyupbit.get_tickers(fiat="KRW")
+        url = "https://api.upbit.com/v1/ticker"
+        all_data = []
+        
+        # 120번을 따로 부르지 않고, 50개씩 묶어서 한 번에 호출합니다.
+        for i in range(0, len(tickers), 50):
+            batch = tickers[i:i+50]
+            res = requests.get(url, headers={"accept": "application/json"}, params={"markets": ",".join(batch)}, timeout=10)
+            if res.status_code == 200:
+                all_data.extend(res.json())
+            time.sleep(0.2) # 💡 필수: 업비트 서버를 화나지 않게 0.2초씩 쉬어줍니다.
+        
         data = []
-
-        for t in tickers:
-            df = pyupbit.get_ohlcv(t, interval="minute5", count=2)
-            if df is None:
-                continue
-            
-            volume = df['volume'].iloc[-1]
-            data.append((t, volume))
+        for item in all_data:
+            if item['market'] == "KRW-BTC": continue
+            # 현재 캔들이 아닌 '24시간 누적 거래대금'을 기준으로 랭킹을 매깁니다.
+            data.append((item['market'], item['acc_trade_price_24h']))
 
         data.sort(key=lambda x: x[1], reverse=True)
         return [x[0] for x in data[:TOP_N]]
-    except:
+    except Exception as e:
+        print(f"TOP_COINS ERROR: {e}") # 💡 에러 발생 시 로그를 남겨 원인을 파악합니다.
         return []
 
 # =========================
@@ -73,10 +81,10 @@ def get_top_coins():
 def ta_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
+    down = -1 * delta.clip(upper=0)
 
-    ema_up = up.ewm(com=period-1).mean()
-    ema_down = down.ewm(com=period-1).mean()
+    ema_up = up.ewm(com=period-1, adjust=False).mean()
+    ema_down = down.ewm(com=period-1, adjust=False).mean()
 
     rs = ema_up / ema_down
     return 100 - (100 / (1 + rs))
@@ -87,6 +95,8 @@ def ta_rsi(series, period=14):
 def check_buy_signal(ticker):
     try:
         df = pyupbit.get_ohlcv(ticker, interval="minute5", count=50)
+        time.sleep(0.1) # 💡 필수: 차트 조회 후 잠깐 쉬어 API 밴을 막습니다.
+        
         if df is None or len(df) < 30:
             return False
 
@@ -95,7 +105,6 @@ def check_buy_signal(ticker):
         df['rsi'] = ta_rsi(df['close'])
 
         cur = df.iloc[-1]
-        prev = df.iloc[-2]
 
         # ✅ 상승 조건 완화
         if cur['close'] < cur['ma20']:
@@ -114,7 +123,9 @@ def check_buy_signal(ticker):
 
         # ✅ 1분봉 상승 확인
         df1 = pyupbit.get_ohlcv(ticker, interval="minute1", count=5)
-        if df1 is None:
+        time.sleep(0.1) # 💡 필수!
+        
+        if df1 is None or len(df1) < 2:
             return False
 
         if df1['close'].iloc[-1] < df1['close'].iloc[-2]:
@@ -123,7 +134,7 @@ def check_buy_signal(ticker):
         return True
 
     except Exception as e:
-        print("BUY ERROR:", e)
+        print(f"BUY SIGNAL ERROR ({ticker}): {e}")
         return False
 
 # =========================
@@ -179,16 +190,25 @@ def sell_coin(ticker, reason):
 # 9. 메인 루프
 # =========================
 def main():
-    send_msg("🚀 V17 실전 자동매매 시작")
+    start_msg = "🚀 V17.1 실전 자동매매 시작 (API 최적화 완료)"
+    send_msg(start_msg)
+    print(start_msg)
+
+    # 루프 바깥에서 타이머를 초기화하여 불필요한 호출을 막습니다.
+    last_top_coins_time = 0
+    top_coins = []
 
     while True:
         try:
+            now = time.time()
             krw = upbit.get_balance("KRW")
             if krw is None:
                 krw = 0
 
-            # TOP 코인
-            top_coins = get_top_coins()
+            # 💡 매번 갱신하지 않고 3분(180초)마다 한 번씩만 갱신하여 봇을 가볍게 만듭니다.
+            if now - last_top_coins_time > 180:
+                top_coins = get_top_coins()
+                last_top_coins_time = now
 
             # =================
             # 매도
@@ -201,9 +221,10 @@ def main():
 
                 if profit >= TAKE_PROFIT:
                     sell_coin(ticker, "🎯 익절")
-
                 elif profit <= STOP_LOSS:
                     sell_coin(ticker, "☠️ 손절")
+                
+                time.sleep(0.1)
 
             # =================
             # 매수
@@ -212,7 +233,7 @@ def main():
                 if ticker in positions:
                     continue
 
-                if ticker in blacklist and time.time() - blacklist[ticker] < 1800:
+                if ticker in blacklist and now - blacklist[ticker] < 1800:
                     continue
 
                 if len(positions) >= MAX_POSITIONS:
@@ -221,7 +242,7 @@ def main():
                 if check_buy_signal(ticker):
                     print(f"[매수 신호] {ticker}")
 
-                    if krw < MIN_ORDER:
+                    if krw < MIN_ORDER * FEE_RATE:
                         continue
 
                     buy_amount = krw / (MAX_POSITIONS - len(positions))
@@ -230,7 +251,10 @@ def main():
                         continue
 
                     buy_coin(ticker, buy_amount)
+                    krw -= (buy_amount * FEE_RATE)
                     time.sleep(1)
+                    
+                time.sleep(0.1)
 
             time.sleep(3)
 
