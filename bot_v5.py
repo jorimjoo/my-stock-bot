@@ -21,15 +21,15 @@ IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16"
 upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
 
 # =========================
-# 2. V19 럭키텐(10개) 폭격 설정값
+# 2. V19.1 럭키텐(10개) 올인원 설정값
 # =========================
-TOP_N = 50              # 💡 감시 종목을 50개로 대폭 확대
-MAX_POSITIONS = 10      # 💡 성조님 명령: 보유 종목 10개로 확장!
+TOP_N = 50              
+MAX_POSITIONS = 10      
 
 # 💡 수익 & 손실 관리
 TRAILING_ACTIVATE = 0.015  # +1.5% 도달 시 트레일링 익절 시작
 TRAILING_DROP = 0.005      # 고점 대비 -0.5% 하락 시 익절
-STOP_LOSS = -0.015         # -1.5% 칼손절 (손실 최소화 원칙)
+STOP_LOSS = -0.015         # -1.5% 칼손절
 
 # ⏰ 타임 컷 설정
 STAGNANT_SEC = 2700        # 45분 횡보 시 무조건 탈출
@@ -71,7 +71,7 @@ def send_system_briefing():
         krw_balance = float(upbit.get_balance("KRW") or 0.0)
         win_rate = (bot_stats["wins"] / bot_stats["trades"] * 100) if bot_stats["trades"] > 0 else 0.0
         
-        msg = f"🐶 [쿠퍼춘봉 V19 🍀럭키텐 폭격 브리핑]\n"
+        msg = f"🐶 [쿠퍼춘봉 V19.1 올인원 브리핑]\n"
         msg += f"⌚ 가동: {bot_stats['start_time'].strftime('%m/%d %H:%M')}\n"
         msg += f"⏳ 구동: {days}일 {hours}시간 {minutes}분\n"
         msg += f"💰 KRW: {krw_balance:,.0f}원\n"
@@ -82,13 +82,76 @@ def send_system_briefing():
     except: pass
 
 # =========================
-# 4. 웹 서버
+# 4. 텔레그램 통신 (💡 올인원 명령어 탑재)
+# =========================
+def telegram_polling():
+    last_update_id = None
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"timeout": 10}
+            if last_update_id: params["offset"] = last_update_id
+            
+            res = requests.get(url, params=params, timeout=15)
+            if res.status_code == 200:
+                for item in res.json().get("result", []):
+                    last_update_id = item["update_id"] + 1
+                    msg_text = str(item.get("message", {}).get("text", "")).strip().upper()
+                    
+                    # 1. 상태 브리핑
+                    if "/상태" in msg_text or "상태" == msg_text:
+                        send_system_briefing()
+
+                    # 2. 💡 매수 권한 테스트 (올인원 탑재)
+                    elif "/매수테스트" in msg_text or "매수테스트" in msg_text:
+                        send_msg("🛠️ [테스트 시작] 비트코인 6,000원어치 시장가 매수 시도 중...")
+                        krw_bal = upbit.get_balance("KRW")
+                        
+                        if krw_bal is None:
+                            send_msg("🚨 [실패] 잔고 조회 불가! (IP 차단 또는 API 만료 의심)")
+                        elif krw_bal < 6000:
+                            send_msg(f"🚨 [실패] 원화 부족 (현재: {krw_bal:,.0f}원)")
+                        else:
+                            try:
+                                res_buy = upbit.buy_market_order("KRW-BTC", 6000)
+                                if res_buy is None or 'error' in res_buy:
+                                    err_detail = res_buy.get('error', {}).get('message', '알 수 없는 에러') if res_buy else '응답 없음'
+                                    send_msg(f"❌ [매수 실패] 주문 권한 없음!\n사유: {err_detail}\n💡 업비트 Open API '주문하기' 권한을 켜주세요.")
+                                else:
+                                    send_msg("🎯 [매수 성공!!!] 비트코인 6,000원 체결 완료!\nAPI 주문 권한이 100% 정상입니다.\n(테스트로 매수한 코인도 봇이 알아서 관리합니다.)")
+                                    # 장부에 등록하여 자동 매도 관리
+                                    time.sleep(1)
+                                    cur_price = pyupbit.get_current_price("KRW-BTC")
+                                    positions["KRW-BTC"] = {'buy_price': cur_price, 'peak_price': cur_price, 'buy_time': time.time()}
+                            except Exception as e:
+                                send_msg(f"❌ [에러] 매수 중 문제 발생: {e}")
+
+                    # 3. 수동 매도 기능
+                    elif "매도" in msg_text:
+                        ticker_raw = msg_text.replace("매도", "").replace("/", "").strip()
+                        if ticker_raw:
+                            ticker = ticker_raw if ticker_raw.startswith("KRW-") else f"KRW-{ticker_raw}"
+                            balance = upbit.get_balance(ticker)
+                            if balance and balance > 0:
+                                try:
+                                    upbit.sell_market_order(ticker, balance)
+                                    positions.pop(ticker, None)
+                                    send_msg(f"⚡ [수동 매도 완료] {ticker} 익절!")
+                                except Exception as e:
+                                    send_msg(f"❌ [실패]: {e}")
+                            else:
+                                send_msg(f"⚠ 보유 중인 {ticker} 코인이 없습니다.")
+        except: pass 
+        time.sleep(2)
+
+# =========================
+# 5. 웹 서버
 # =========================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write("🚀 춘봉봇 V19 럭키텐 에디션 가동중!".encode('utf-8'))
+        self.wfile.write("🚀 춘봉봇 V19.1 올인원 에디션 가동중!".encode('utf-8'))
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -96,7 +159,7 @@ def run_server():
     server.serve_forever()
 
 # =========================
-# 5. 종목 스캔 (상위 50개)
+# 6. 종목 스캔 (상위 50개)
 # =========================
 def get_top_coins():
     try:
@@ -132,7 +195,7 @@ def ta_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 # =========================
-# 6. 매수 로직 (💡 진입 문턱 현실적으로 완화)
+# 7. 매수 로직 
 # =========================
 def check_buy_signal(ticker):
     try:
@@ -147,22 +210,13 @@ def check_buy_signal(ticker):
 
         cur = df.iloc[-1]
         
-        # 1. 추세 확인: 현재가가 20일선 위에만 있으면 일단 OK!
-        if cur['close'] < cur['ma20']:
-            return False
-
-        # 2. 양봉 확인
-        if cur['close'] <= cur['open']:
-            return False
-
-        # 3. 수급 확인: 거래량이 최근 20평균보다 1.1배만 높아도 즉각 진입! (기존 1.5배에서 완화)
+        if cur['close'] < cur['ma20']: return False
+        if cur['close'] <= cur['open']: return False
+        
         vol_avg = df['volume'].rolling(20).mean().iloc[-1]
-        if cur['volume'] < vol_avg * 1.1:
-            return False
-
-        # 4. 과열 방지: RSI 75까지 허용 (기존 70에서 완화)
-        if cur['rsi'] > 75:
-            return False
+        if cur['volume'] < vol_avg * 1.1: return False
+        
+        if cur['rsi'] > 75: return False
 
         return True
 
@@ -170,7 +224,7 @@ def check_buy_signal(ticker):
         return False
 
 # =========================
-# 7. 장부 및 매매 실행
+# 8. 장부 및 매매 실행
 # =========================
 def sync_balances():
     balances = upbit.get_balances()
@@ -234,10 +288,10 @@ def sell_coin(ticker, reason, current_price, buy_price):
     except Exception as e: pass
 
 # =========================
-# 8. 메인 루프
+# 9. 메인 루프
 # =========================
 def main():
-    start_msg = "== 업비트 봇 가동 시작 ==\n🚀 V19 럭키텐(10종목) 폭격 에디션 가동!"
+    start_msg = "== 업비트 봇 가동 시작 ==\n🚀 V19.1 올인원(럭키텐+테스트명령어) 에디션 가동!"
     send_msg(start_msg)
     print(start_msg)
 
@@ -254,13 +308,11 @@ def main():
 
             krw = sync_balances()
             
-            # 블랙리스트 30분 후 해제
             blacklist_keys = list(blacklist.keys())
             for k in blacklist_keys:
                 if now - blacklist[k] > 1800:
                     del blacklist[k]
 
-            # 종목 스캔 (1분마다 빠르게 새로고침)
             if now - last_top_coins_time > 60:
                 top_coins = get_top_coins()
                 last_top_coins_time = now
@@ -284,17 +336,14 @@ def main():
                     
                 drop_from_peak = (pos['peak_price'] - current_price) / pos['peak_price']
 
-                # 1. 트레일링 익절
                 if profit >= TRAILING_ACTIVATE and drop_from_peak >= TRAILING_DROP:
                     sell_coin(ticker, "💸 [스마트 익절]", current_price, buy_price)
                     continue
                 
-                # 2. 칼손절 (-1.5%)
                 if profit <= STOP_LOSS:
                     sell_coin(ticker, "☠️ [방어선 칼손절]", current_price, buy_price)
                     continue
 
-                # 3. 45분 횡보 타임컷
                 if held_time >= STAGNANT_SEC:
                     if profit > 0:
                         sell_coin(ticker, "🥱 [횡보 약수익 탈출]", current_price, buy_price)
@@ -318,7 +367,6 @@ def main():
                     if krw < MIN_ORDER * FEE_RATE:
                         continue
 
-                    # 💡 10개 종목을 위해 자산을 10분할하여 진입
                     buy_amount = krw / (MAX_POSITIONS - len(positions))
 
                     if buy_amount < MIN_ORDER:
@@ -340,4 +388,5 @@ def main():
 # =========================
 if __name__ == "__main__":
     Thread(target=run_server, daemon=True).start()
+    Thread(target=telegram_polling, daemon=True).start()
     main()
